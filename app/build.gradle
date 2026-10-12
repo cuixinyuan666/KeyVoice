@@ -1,0 +1,60 @@
+apply plugin: 'com.android.application'
+
+// ---------------------------------------------------------------------------
+// 正式签名：
+//   把你的 .jks/.keystore 放进项目根目录，再把 keystore.properties.example
+//   复制成 keystore.properties 并填好四行，然后：
+//       gradlew assembleRelease
+//   就会产出 app\build\outputs\apk\release\app-release.apk（已用正式签名）。
+// 没有 keystore.properties 时不会偷偷用测试签名，产出的就是未签名的
+// app-release-unsigned.apk，可交给你的正式签名流程。
+// ---------------------------------------------------------------------------
+def ksPropsFile = rootProject.file("keystore.properties")
+def ksProps = new Properties()
+if (ksPropsFile.exists()) {
+    ksProps.load(new FileInputStream(ksPropsFile))
+}
+def hasKs = ksPropsFile.exists() && ksProps['storeFile'] != null
+
+android {
+    namespace 'com.keyvoice'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.keyvoice"
+        minSdk 28
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+    }
+
+    signingConfigs {
+        release {
+            if (hasKs) {
+                storeFile rootProject.file(ksProps['storeFile'])
+                storePassword ksProps['storePassword']
+                keyAlias ksProps['keyAlias']
+                keyPassword ksProps['keyPassword']
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            if (hasKs) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+
+    lintOptions {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+}

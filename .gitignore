@@ -1,0 +1,18 @@
+*.iml
+.gradle/
+/local.properties
+/.idea/
+.DS_Store
+build/
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+__pycache__/
+*.pyc
+
+# 签名相关：绝不进仓库
+*.jks
+*.keystore
+keystore.properties
