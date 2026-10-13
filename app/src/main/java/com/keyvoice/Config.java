@@ -80,4 +80,8 @@ public class Config {
     /** 听写时点亮屏幕（dim），让息屏触发也能正常识别；停止后自动灭屏 */
     public boolean keepScreen() { return sp.getBoolean("keep_screen", true); }
     public void keepScreen(boolean v) { sp.edit().putBoolean("keep_screen", v).apply(); }
+
+    /** ime 模式下模拟“按住空格”：第一次按物理键=按住讯飞空格开始语音，再按一次=松开并自动发送 */
+    public boolean imeHold() { return sp.getBoolean("ime_hold", true); }
+    public void imeHold(boolean v) { sp.edit().putBoolean("ime_hold", v).apply(); }
 }

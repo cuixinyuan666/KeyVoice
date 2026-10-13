@@ -33,13 +33,21 @@ public class VoiceInputActivity extends Activity {
     private final Handler h = new Handler(Looper.getMainLooper());
     private Config cfg;
     private boolean sending = false;
+    /** 模拟空格“松开”后置位：等讯飞出字后立即发送（优先于普通自动发送） */
+    private boolean commitWait = false;
 
     private final Runnable autoSendTask = () -> doSend(false);
 
     private final BroadcastReceiver commit = new BroadcastReceiver() {
         @Override
         public void onReceive(Context c, Intent i) {
-            doSend(true);
+            String t = et.getText() == null ? "" : et.getText().toString();
+            if (t.trim().isEmpty()) {
+                commitWait = true;   // 松开了但讯飞还没出字，等文字一到就发
+                tvStatus.setText("已松开，等识别出字后自动发送…");
+            } else {
+                doSend(true);
+            }
         }
     };
 
@@ -83,6 +91,13 @@ public class VoiceInputActivity extends Activity {
             @Override public void onTextChanged(CharSequence s, int a, int b, int c) { }
 
             @Override public void afterTextChanged(Editable s) {
+                if (commitWait && s != null && !s.toString().trim().isEmpty()) {
+                    // 模拟空格松开后，讯飞出字 -> 立即发送
+                    commitWait = false;
+                    h.removeCallbacks(autoSendTask);
+                    h.postDelayed(() -> doSend(false), 700);
+                    return;
+                }
                 if (!cfg.autoSend()) return;
                 if (s == null || s.toString().trim().isEmpty()) return;
                 h.removeCallbacks(autoSendTask);
