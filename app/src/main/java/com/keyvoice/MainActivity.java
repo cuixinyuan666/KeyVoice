@@ -237,7 +237,11 @@ public class MainActivity extends Activity {
 
         // 在首次布局完成后再还原存档位置：此时通过布局规则算出的按钮 left/top 已确定，
         // 才能按容器当前宽高正确重投影，避免按钮落到容器外。
-        side.post(() -> side.restorePositions(cfg.layoutJson()));
+        side.post(() -> {
+            side.restorePositions(cfg.layoutJson());
+            // 兜底：如果还原后按钮仍不在可视区内，直接复位为默认规则布局。
+            side.ensureVisible(this::showCenterTip);
+        });
 
         et.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) { }

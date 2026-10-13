@@ -5,12 +5,12 @@ import android.graphics.drawable.Drawable;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.AttributeSet;
+import android.util.Log;
 import android.view.MotionEvent;
 import android.view.ScaleGestureDetector;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.ImageButton;
-import android.widget.ImageView;
 import android.widget.RelativeLayout;
 
 import java.util.HashMap;
@@ -19,11 +19,13 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * 主页面右侧按钮容器：长按任一按钮进入“编辑/框选”态（虚线边框），
+ * 主页面按钮容器：长按任一按钮进入“编辑/框选”态（虚线边框），
  * 单指拖动移动、双指捏合缩放，右上角 √ 保存位置与缩放比例（按容器宽高归一化坐标）到 Config。
  * 非编辑态时点击按钮执行原功能（交给各自 OnClickListener）。
  */
 public class DragLayout extends RelativeLayout {
+
+    private static final String TAG = "KeyVoiceLayout";
 
     private final Set<String> KEYS = new HashSet<>();
     {
@@ -212,7 +214,7 @@ public class DragLayout extends RelativeLayout {
 
     // ---- 持久化 ----
     private void savePositions() {
-        if (cfg == null || getWidth() == 0) return;
+        if (cfg == null || getWidth() == 0 || getHeight() == 0) return;
         int W = getWidth(), H = getHeight();
         StringBuilder sb = new StringBuilder("{");
         boolean first = true;
@@ -242,6 +244,7 @@ public class DragLayout extends RelativeLayout {
             float[] p = e.getValue();
             apply(e.getKey(), p[0], p[1], p[2]);
         }
+        dumpGeometry("restore");
     }
 
     /**
@@ -259,6 +262,7 @@ public class DragLayout extends RelativeLayout {
         if (v == null) return;
         int w = v.getWidth();
         if (w <= 0) w = Ui.dp(getContext(), 38);   // 尚未测量时退回按钮默认直径
+        if (Float.isNaN(fx) || Float.isNaN(fy) || Float.isNaN(scale)) return;
         if (scale < 0.5f || scale > 3f) scale = 1f; // 存档异常时丢弃缩放
 
         float sw = w * scale;                      // 缩放后的实际占位
@@ -269,18 +273,47 @@ public class DragLayout extends RelativeLayout {
         int left = (int) clamp(cx - sw / 2f, 0f, Math.max(0f, getWidth() - sw));
         int top  = (int) clamp(cy - sw / 2f, 0f, Math.max(0f, getHeight() - sw));
 
-        RelativeLayout.LayoutParams lp = (RelativeLayout.LayoutParams) v.getLayoutParams();
-        lp.removeRule(ALIGN_PARENT_RIGHT); lp.removeRule(ALIGN_PARENT_LEFT);
-        lp.removeRule(ALIGN_PARENT_TOP); lp.removeRule(ALIGN_PARENT_BOTTOM);
-        lp.removeRule(CENTER_VERTICAL);
-        lp.removeRule(CENTER_HORIZONTAL); lp.removeRule(BELOW); lp.removeRule(ABOVE);
-        lp.removeRule(RIGHT_OF); lp.removeRule(LEFT_OF);
+        RelativeLayout.LayoutParams lp = asRelativeParams(v);
+        clearRules(lp);
         lp.leftMargin = left;
         lp.topMargin = top;
         v.setLayoutParams(lp);
         v.setTranslationX(0f);
         v.setTranslationY(0f);
         v.setScaleX(scale); v.setScaleY(scale);
+    }
+
+    /**
+     * 自愈兜底：检查三个按钮是否真的落在容器可视区内。
+     * 只要有一个按钮不可见（宽高为 0、或完全在容器外、或被判定为不可见），
+     * 就清空异常存档并复位为默认规则布局，避免用户看到“按钮全没了”却无从恢复。
+     *
+     * @param notifier 复位发生时用于提示用户（可为 null）
+     */
+    public void ensureVisible(final java.util.function.Consumer<String> notifier) {
+        if (getWidth() == 0 || getHeight() == 0) return;
+        boolean broken = false;
+        for (String key : KEYS) {
+            View v = findByTag(key);
+            if (v == null) { broken = true; break; }
+            if (v.getVisibility() != View.VISIBLE || v.getWidth() <= 0 || v.getHeight() <= 0) {
+                broken = true; break;
+            }
+            float sw = v.getWidth() * v.getScaleX();
+            float sh = v.getHeight() * v.getScaleY();
+            float left = v.getX(), top = v.getY();
+            // 与容器可视区至少要有 8dp 的重叠，否则用户根本看不到/点不到
+            float minOverlap = Ui.dp(getContext(), 8);
+            boolean visibleInContainer =
+                    left + sw > minOverlap && left < getWidth() - minOverlap
+                            && top + sh > minOverlap && top < getHeight() - minOverlap;
+            if (!visibleInContainer) { broken = true; break; }
+        }
+        dumpGeometry(broken ? "ensureVisible:MISSING" : "ensureVisible:OK");
+        if (broken) {
+            resetLayout();
+            if (notifier != null) notifier.accept("按钮位置异常，已自动复位");
+        }
     }
 
     /**
@@ -305,6 +338,7 @@ public class DragLayout extends RelativeLayout {
         resetView("s", ALIGN_PARENT_RIGHT, CENTER_VERTICAL, 0, 0, bs, bs);
         resetView("h", ALIGN_PARENT_RIGHT, BELOW, 0, gap, bs, bs);
         resetView("e", ALIGN_PARENT_RIGHT, BELOW, 0, gap, bs, bs);
+        dumpGeometry("reset");
     }
 
     /** 把某个 tag 的按钮恢复成规则布局（右侧对齐 + 依次向下），并清零缩放/位移。 */
@@ -312,9 +346,7 @@ public class DragLayout extends RelativeLayout {
         View v = findByTag(key);
         if (v == null) return;
         RelativeLayout.LayoutParams lp = new RelativeLayout.LayoutParams(bw, bh);
-        lp.removeRule(ALIGN_PARENT_LEFT); lp.removeRule(ALIGN_PARENT_TOP);
-        lp.removeRule(ALIGN_PARENT_BOTTOM); lp.removeRule(CENTER_HORIZONTAL);
-        lp.removeRule(ABOVE); lp.removeRule(RIGHT_OF); lp.removeRule(LEFT_OF);
+        clearRules(lp);
         if (rule1 != 0) lp.addRule(rule1);
         if (rule2 != 0) lp.addRule(rule2);
         if (rule2 == BELOW) {
@@ -328,6 +360,47 @@ public class DragLayout extends RelativeLayout {
         v.setTranslationY(0f);
         v.setScaleX(1f);
         v.setScaleY(1f);
+    }
+
+    private void clearRules(RelativeLayout.LayoutParams lp) {
+        lp.removeRule(ALIGN_PARENT_RIGHT); lp.removeRule(ALIGN_PARENT_LEFT);
+        lp.removeRule(ALIGN_PARENT_TOP); lp.removeRule(ALIGN_PARENT_BOTTOM);
+        lp.removeRule(CENTER_VERTICAL); lp.removeRule(CENTER_HORIZONTAL);
+        lp.removeRule(BELOW); lp.removeRule(ABOVE);
+        lp.removeRule(RIGHT_OF); lp.removeRule(LEFT_OF);
+    }
+
+    /**
+     * 取到 RelativeLayout.LayoutParams。若当前是别的类型（例如 Ui.iconButton 里设的
+     * 纯 ViewGroup.LayoutParams），就地转换，绝不抛 ClassCastException。
+     */
+    private RelativeLayout.LayoutParams asRelativeParams(View v) {
+        ViewGroup.LayoutParams cur = v.getLayoutParams();
+        if (cur instanceof RelativeLayout.LayoutParams) return (RelativeLayout.LayoutParams) cur;
+        int w = cur != null && cur.width > 0 ? cur.width : Ui.dp(getContext(), 38);
+        int hgt = cur != null && cur.height > 0 ? cur.height : Ui.dp(getContext(), 38);
+        return new RelativeLayout.LayoutParams(w, hgt);
+    }
+
+    /** 诊断：把容器与三个按钮的实际几何打到 logcat（tag: KeyVoiceLayout）。 */
+    public void dumpGeometry(String stage) {
+        try {
+            Log.i(TAG, "---- " + stage + " ---- container w=" + getWidth() + " h=" + getHeight()
+                    + " visibility=" + getVisibility());
+            for (int i = 0; i < getChildCount(); i++) {
+                View ch = getChildAt(i);
+                Log.i(TAG, "  child[" + i + "] tag=" + ch.getTag()
+                        + " class=" + ch.getClass().getSimpleName()
+                        + " vis=" + ch.getVisibility()
+                        + " w=" + ch.getWidth() + " h=" + ch.getHeight()
+                        + " x=" + ch.getX() + " y=" + ch.getY()
+                        + " sx=" + ch.getScaleX() + " sy=" + ch.getScaleY()
+                        + " lm=" + ((RelativeLayout.LayoutParams) asRelativeParams(ch)).leftMargin
+                        + " tm=" + ((RelativeLayout.LayoutParams) asRelativeParams(ch)).topMargin);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "dumpGeometry failed", e);
+        }
     }
 
     private View findByTag(String key) {
