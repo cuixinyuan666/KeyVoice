@@ -26,8 +26,8 @@ public class Config {
     public String action() { return sp.getString("action", "paste"); }
     public void action(String v) { sp.edit().putString("action", v).apply(); }
 
-    /** ime=用手机上装的输入法（讯飞）语音输入；sr=直接调用系统/讯飞识别服务（可灭屏） */
-    public String mode() { return sp.getString("mode", "ime"); }
+    /** ime=用手机上装的输入法（讯飞）语音输入（会弹输入法框）；sr=直接调用系统/讯飞识别服务（后台、不弹框，可灭屏） */
+    public String mode() { return sp.getString("mode", "sr"); }
     public void mode(String v) { sp.edit().putString("mode", v).apply(); }
 
     public String srComponent() { return sp.getString("sr_component", ""); }
@@ -72,4 +72,12 @@ public class Config {
 
     public boolean autoStart() { return sp.getBoolean("auto_start", false); }
     public void autoStart(boolean v) { sp.edit().putBoolean("auto_start", v).apply(); }
+
+    /** 屏蔽触发键的原功能（如音量键不再调音量），只在 App 运行时对绑定键生效 */
+    public boolean blockKey() { return sp.getBoolean("block_key", true); }
+    public void blockKey(boolean v) { sp.edit().putBoolean("block_key", v).apply(); }
+
+    /** 听写时点亮屏幕（dim），让息屏触发也能正常识别；停止后自动灭屏 */
+    public boolean keepScreen() { return sp.getBoolean("keep_screen", true); }
+    public void keepScreen(boolean v) { sp.edit().putBoolean("keep_screen", v).apply(); }
 }

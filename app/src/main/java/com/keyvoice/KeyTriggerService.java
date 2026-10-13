@@ -33,11 +33,11 @@ public class KeyTriggerService extends AccessibilityService {
             if (event.getAction() == KeyEvent.ACTION_DOWN) {
                 downAt = System.currentTimeMillis();
                 if (!cfg.longPress()) fire();     // 短按：按下即触发
-                return true;                      // 长按：先吞掉，等抬手再判定
             } else if (event.getAction() == KeyEvent.ACTION_UP) {
                 if (cfg.longPress() && System.currentTimeMillis() - downAt >= 500) fire();
-                return true;
             }
+            // 吞掉该键原功能（音量键不再调音量等）；blockKey 关掉则放行原功能只触发
+            return cfg.blockKey();
         }
         return super.onKeyEvent(event);
     }

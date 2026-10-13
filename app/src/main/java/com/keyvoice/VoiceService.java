@@ -52,6 +52,7 @@ public class VoiceService extends Service {
     private SpeechRecognizer sr;
     private boolean listening = false;
     private PowerManager.WakeLock wakeLock;
+    private PowerManager.WakeLock screenWakeLock;
     private WifiManager.WifiLock wifiLock;
     private MediaSession mediaSession;
     private Handler main;
@@ -309,6 +310,20 @@ public class VoiceService extends Service {
             if (!wakeLock.isHeld()) wakeLock.acquire(3 * 60 * 1000L);
         } catch (Exception ignored) {
         }
+        // 锁屏听写：点亮屏幕（dim），否则 SpeechRecognizer 在息屏时会被系统停掉
+        if (new Config(this).keepScreen()) {
+            try {
+                if (screenWakeLock == null) {
+                    PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+                    screenWakeLock = pm.newWakeLock(
+                            PowerManager.SCREEN_DIM_WAKE_LOCK
+                                    | PowerManager.ACQUIRE_CAUSES_WAKEUP, "KeyVoice:Screen");
+                    screenWakeLock.setReferenceCounted(false);
+                }
+                if (!screenWakeLock.isHeld()) screenWakeLock.acquire(3 * 60 * 1000L);
+            } catch (Exception ignored) {
+            }
+        }
         try {
             if (wifiLock == null) {
                 WifiManager wm = (WifiManager) getApplicationContext().getSystemService(WIFI_SERVICE);
@@ -325,6 +340,10 @@ public class VoiceService extends Service {
     private void releaseLocks() {
         try {
             if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
+        } catch (Exception ignored) {
+        }
+        try {
+            if (screenWakeLock != null && screenWakeLock.isHeld()) screenWakeLock.release();
         } catch (Exception ignored) {
         }
         try {

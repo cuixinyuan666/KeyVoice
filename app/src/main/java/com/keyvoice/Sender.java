@@ -69,6 +69,36 @@ public class Sender {
         });
     }
 
+    /** 探测电脑接收端是否在线（GET /ping） */
+    public static void ping(final Context ctx, final Callback cb) {
+        final Config cfg = new Config(ctx);
+        final String host = cfg.adbMode() ? "127.0.0.1" : cfg.host();
+        final int port = cfg.port();
+        POOL.execute(() -> {
+            boolean ok = false;
+            String msg = "";
+            HttpURLConnection conn = null;
+            try {
+                if (host == null || host.isEmpty()) throw new Exception("未设置电脑 IP");
+                URL url = new URL("http://" + host + ":" + port + "/ping");
+                conn = (HttpURLConnection) url.openConnection();
+                conn.setRequestMethod("GET");
+                conn.setConnectTimeout(2500);
+                conn.setReadTimeout(2500);
+                int code = conn.getResponseCode();
+                ok = code >= 200 && code < 300;
+                msg = "HTTP " + code;
+            } catch (Exception e) {
+                msg = e.getMessage() == null ? e.toString() : e.getMessage();
+            } finally {
+                if (conn != null) conn.disconnect();
+            }
+            final boolean fOk = ok;
+            final String fMsg = msg;
+            MAIN.post(() -> { if (cb != null) cb.onResult(fOk, fMsg); });
+        });
+    }
+
     private static String json(String s) {
         if (s == null) return "\"\"";
         StringBuilder sb = new StringBuilder(s.length() + 16);

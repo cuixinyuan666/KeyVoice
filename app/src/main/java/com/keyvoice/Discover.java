@@ -5,15 +5,18 @@ import android.net.wifi.WifiManager;
 
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.SocketTimeoutException;
 import java.util.LinkedHashSet;
 import java.util.Set;
 
-/** 监听电脑端发来的 UDP 广播，自动发现局域网里的 Windows 接收端 */
+/** 局域网自动发现：手机发 KEYVOICE_DISCOVER 广播，电脑接收端回 KEYVOICE_HELLO:<port> */
 public class Discover {
 
     public static final int BEACON_PORT = 17891;
+    public static final String REQUEST = "KEYVOICE_DISCOVER";
+    public static final String REPLY = "KEYVOICE_HELLO";
 
     public interface Sink {
         void onFound(String ip, int port);
@@ -38,8 +41,18 @@ public class Discover {
             try {
                 s = new DatagramSocket(null);
                 s.setReuseAddress(true);
+                s.setBroadcast(true);
                 s.setSoTimeout(700);
                 s.bind(new InetSocketAddress(BEACON_PORT));
+
+                // 主动广播几次发现请求（电脑端监听到后会单播回包）
+                byte[] disc = REQUEST.getBytes("UTF-8");
+                InetAddress bcast = InetAddress.getByName("255.255.255.255");
+                DatagramPacket out = new DatagramPacket(disc, disc.length, bcast, BEACON_PORT);
+                for (int i = 0; i < 3; i++) {
+                    try { s.send(out); } catch (Exception ignored) { }
+                    Thread.sleep(120);
+                }
 
                 long end = System.currentTimeMillis() + timeoutMs;
                 byte[] buf = new byte[256];
@@ -51,17 +64,17 @@ public class Discover {
                         continue;
                     }
                     String msg = new String(p.getData(), 0, p.getLength(), "UTF-8").trim();
-                    if (!msg.startsWith("KEYVOICE_HELLO")) continue;
+                    if (!msg.startsWith(REPLY)) continue;
                     String[] parts = msg.split(":");
                     int port = 17890;
                     if (parts.length > 1) {
                         try {
-                            port = Integer.parseInt(parts[1]);
+                            port = Integer.parseInt(parts[1].trim());
                         } catch (NumberFormatException ignored) {
                         }
                     }
                     String ip = p.getAddress().getHostAddress();
-                    if (seen.add(ip + ":" + port)) sink.onFound(ip, port);
+                    if (ip != null && seen.add(ip + ":" + port)) sink.onFound(ip, port);
                 }
             } catch (Exception ignored) {
             } finally {

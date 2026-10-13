@@ -40,6 +40,7 @@ public class MainActivity extends Activity {
     private Button btnScan;
     private CheckBox cbAutoSend, cbAutoClose, cbNewline, cbLongPress;
     private CheckBox cbResident, cbContinuous, cbMedia, cbVibrate, cbAutoStart;
+    private CheckBox cbBlockKey, cbKeepScreen;
 
     private final List<String> engineLabels = new ArrayList<>();
     private final List<String> engineComps = new ArrayList<>();
@@ -113,6 +114,7 @@ public class MainActivity extends Activity {
 
         spEngine = new Spinner(this);
         root.addView(spEngine);
+        root.addView(label("识别引擎默认自动选「讯飞（讯飞）」；若手机没暴露讯飞识别服务，则回退系统默认（多数国产机底层也是讯飞）。均无需弹输入法框、可后台/灭屏运行。"));
         loadEngines();
 
         // ---- 电脑端动作
@@ -154,6 +156,16 @@ public class MainActivity extends Activity {
         root.addView(cbVibrate);
         cbAutoStart = check("开机自动启动", cfg.autoStart());
         root.addView(cbAutoStart);
+        cbBlockKey = check("屏蔽触发键原功能（音量键等不再调音量）", cfg.blockKey());
+        root.addView(cbBlockKey);
+        cbKeepScreen = check("听写时点亮屏幕（锁屏触发也能识别）", cfg.keepScreen());
+        root.addView(cbKeepScreen);
+
+        root.addView(title("锁屏怎么用"));
+        root.addView(label("锁屏下物理键系统不派发，请用这两种方式触发：\n"
+                + "① 下拉通知栏点本服务的「听写/停止」按钮（锁屏可直接点）；\n"
+                + "② 按耳机/蓝牙媒体的播放键（已在「触发方式」里开启）。\n"
+                + "触发后会点亮屏幕完成听写，停了自动灭屏。"));
 
         LinearLayout row3 = row();
         row3.addView(button("启动常驻服务", v -> {
@@ -238,7 +250,7 @@ public class MainActivity extends Activity {
     }
 
     private void scanPc() {
-        tvInfo.setText("正在搜索（3 秒）…");
+        tvInfo.setText("正在搜索电脑（3 秒）…");
         final List<String> found = new ArrayList<>();
         Discover.scan(this, 3000, new Discover.Sink() {
             @Override public void onFound(final String ip, final int port) {
@@ -248,22 +260,35 @@ public class MainActivity extends Activity {
             @Override public void onDone(final int count) {
                 runOnUiThread(() -> {
                     if (count == 0) {
-                        tvInfo.setText("没搜到。确认电脑上已运行接收端，且手机与电脑同一 WiFi。");
+                        tvInfo.setText("没搜到。确认：①电脑已运行接收端；②手机与电脑同一 WiFi；③电脑防火墙放行 17890/17891。");
                         return;
                     }
                     String[] items = found.toArray(new String[0]);
-                    new AlertDialog.Builder(MainActivity.this)
-                            .setTitle("选择电脑")
-                            .setItems(items, (d, which) -> {
-                                String[] sp = items[which].split(":");
-                                etHost.setText(sp[0]);
-                                if (sp.length > 1) etPort.setText(sp[1]);
-                                save();
-                                tvInfo.setText("已选择 " + items[which]);
-                            }).show();
+                    if (items.length == 1) {
+                        connectTo(items[0]);
+                    } else {
+                        new AlertDialog.Builder(MainActivity.this)
+                                .setTitle("选择电脑")
+                                .setItems(items, (d, which) -> connectTo(items[which]))
+                                .show();
+                    }
                 });
             }
         });
+    }
+
+    private void connectTo(String s) {
+        String[] sp = s.split(":");
+        etHost.setText(sp[0]);
+        if (sp.length > 1) etPort.setText(sp[1]);
+        rgTrans.check(11);          // 切到局域网模式
+        applyTransport();
+        save();
+        tvInfo.setText("已锁定 " + s + "，正在测试连接…");
+        final String target = s;
+        Sender.ping(this, (ok, msg) -> tvInfo.setText(ok
+                ? "已自动连接：" + target + "（收到文字将直接上屏到电脑光标处）"
+                : "已填 " + target + " 但连不通：" + msg + "，检查电脑防火墙/接收端"));
     }
 
     private void testSend() {
@@ -301,6 +326,8 @@ public class MainActivity extends Activity {
         cfg.continuous(cbContinuous.isChecked());
         cfg.vibrate(cbVibrate.isChecked());
         cfg.autoStart(cbAutoStart.isChecked());
+        cfg.blockKey(cbBlockKey.isChecked());
+        cfg.keepScreen(cbKeepScreen.isChecked());
         cfg.autoSend(cbAutoSend.isChecked());
         cfg.autoClose(cbAutoClose.isChecked());
         cfg.addNewline(cbNewline.isChecked());
