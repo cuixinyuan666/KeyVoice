@@ -6,14 +6,26 @@ import android.content.SharedPreferences;
 /** 所有设置的读写集中在这里 */
 public class Config {
     private static final String P = "keyvoice";
+    private static final int DEFAULTS_VER = 2;   // v2：局域网默认 / 讯飞输入法默认 / 音量减默认触发键
     private final SharedPreferences sp;
 
     public Config(Context c) {
         sp = c.getSharedPreferences(P, Context.MODE_PRIVATE);
+        // 升级迁移：旧版本装过的设备也强制套用新默认值（只跑一次）
+        if (sp.getInt("defaults_ver", 0) < DEFAULTS_VER) {
+            sp.edit()
+                    .putBoolean("adb_mode", false)      // 默认局域网 WiFi
+                    .putString("mode", "ime")           // 默认讯飞输入法语音
+                    .putInt("trigger_key", 25)          // 默认音量减键
+                    .putBoolean("block_key", true)      // 屏蔽触发键原功能
+                    .putBoolean("ime_hold", true)       // 开启三步式模拟空格
+                    .putInt("defaults_ver", DEFAULTS_VER)
+                    .apply();
+        }
     }
 
-    /** adb 模式：走 adb reverse 隧道，手机发往自己的 127.0.0.1，不需要局域网 */
-    public boolean adbMode() { return sp.getBoolean("adb_mode", true); }
+    /** adb 模式：走 adb reverse 隧道。默认关闭 → 默认走局域网 WiFi 并自动扫描 */
+    public boolean adbMode() { return sp.getBoolean("adb_mode", false); }
     public void adbMode(boolean v) { sp.edit().putBoolean("adb_mode", v).apply(); }
 
     public String host() { return sp.getString("host", ""); }
@@ -26,8 +38,8 @@ public class Config {
     public String action() { return sp.getString("action", "paste"); }
     public void action(String v) { sp.edit().putString("action", v).apply(); }
 
-    /** ime=用手机上装的输入法（讯飞）语音输入（会弹输入法框）；sr=直接调用系统/讯飞识别服务（后台、不弹框，可灭屏） */
-    public String mode() { return sp.getString("mode", "sr"); }
+    /** ime=用手机上装的输入法（讯飞）语音输入（默认）；sr=直接调用系统/讯飞识别服务（可灭屏） */
+    public String mode() { return sp.getString("mode", "ime"); }
     public void mode(String v) { sp.edit().putString("mode", v).apply(); }
 
     public String srComponent() { return sp.getString("sr_component", ""); }
@@ -42,8 +54,8 @@ public class Config {
     public boolean autoClose() { return sp.getBoolean("auto_close", true); }
     public void autoClose(boolean v) { sp.edit().putBoolean("auto_close", v).apply(); }
 
-    /** 触发用的物理按键 keyCode，0=未设置 */
-    public int triggerKey() { return sp.getInt("trigger_key", 0); }
+    /** 触发用的物理按键 keyCode，默认音量减键（KEYCODE_VOLUME_DOWN=25），0=未设置 */
+    public int triggerKey() { return sp.getInt("trigger_key", 25); }
     public void triggerKey(int v) { sp.edit().putInt("trigger_key", v).apply(); }
 
     public boolean longPress() { return sp.getBoolean("long_press", false); }

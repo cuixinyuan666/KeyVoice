@@ -8,7 +8,9 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.graphics.Color;
+import android.net.Uri;
 import android.os.Bundle;
+import android.os.PowerManager;
 import android.provider.Settings;
 import android.speech.RecognitionService;
 import android.text.TextUtils;
@@ -133,13 +135,15 @@ public class MainActivity extends Activity {
         LinearLayout row2 = row();
         row2.addView(button("学习按键", v -> learnKey()));
         row2.addView(button("清除按键", v -> {
-            cfg.triggerKey(0);
-            tvTrigger.setText("当前触发键：" + keyName(0));
+            cfg.triggerKey(25);   // 恢复默认：音量减键
+            tvTrigger.setText("当前触发键：" + keyName(cfg.triggerKey()));
         }));
         root.addView(row2);
 
         root.addView(button("打开系统无障碍设置（实体键触发必开）", v ->
                 startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))));
+
+        root.addView(button("一键开启所需权限（自动逐项跳转）", v -> wizardNext()));
 
         cbLongPress = check("长按触发（≥0.5 秒，避免误触）", cfg.longPress());
         root.addView(cbLongPress);
@@ -202,6 +206,70 @@ public class MainActivity extends Activity {
 
         applyTransport();
         refresh();
+
+        // 默认局域网：没填过电脑 IP 就打开即自动扫描
+        if (!cfg.adbMode() && cfg.host().isEmpty()) {
+            tvInfo.setText("局域网模式：正在自动扫描电脑…");
+            etPort.postDelayed(this::scanPc, 600);
+        }
+    }
+
+    // ------------------------------------------------------- 权限自动跳转
+
+    private boolean micGranted() {
+        return checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+                == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private boolean accEnabled() {
+        try {
+            String s = Settings.Secure.getString(getContentResolver(),
+                    Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
+            return s != null && s.toLowerCase().contains(getPackageName().toLowerCase());
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private boolean batteryIgnored() {
+        PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+        return pm != null && pm.isIgnoringBatteryOptimizations(getPackageName());
+    }
+
+    private boolean needWizard() {
+        return !micGranted() || !accEnabled() || !batteryIgnored();
+    }
+
+    /** 逐项自动跳转：麦克风 → 无障碍 → 电池优化；每次回到本页自动进入下一项 */
+    private void wizardNext() {
+        if (!micGranted()) {
+            tvInfo.setText("权限引导 1/3：请求麦克风权限…");
+            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, 100);
+            return;
+        }
+        if (!accEnabled()) {
+            tvInfo.setText("权限引导 2/3：请打开「按键语音 · 按键监听」开关后返回，会自动继续…");
+            try {
+                startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+            } catch (Exception ignored) {
+            }
+            return;
+        }
+        if (!batteryIgnored()) {
+            tvInfo.setText("权限引导 3/3：请允许忽略电池优化（保证后台常驻不被杀）…");
+            try {
+                startActivity(new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                        Uri.parse("package:" + getPackageName())));
+            } catch (Exception e) {
+                try {
+                    startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+                } catch (Exception ignored) {
+                }
+            }
+            return;
+        }
+        tvInfo.setText("✓ 权限全部就绪。触发键：" + keyName(cfg.triggerKey())
+                + "，点「启动常驻服务」即可开始使用。");
     }
 
     // ------------------------------------------------------------- 逻辑
@@ -403,5 +471,6 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         refresh();
+        if (needWizard()) wizardNext();  // 从设置页返回后自动进入下一项
     }
 }

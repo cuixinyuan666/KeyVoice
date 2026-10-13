@@ -117,6 +117,7 @@ public class VoiceInputActivity extends Activity {
                 if (imm != null) imm.hideSoftInputFromWindow(et.getWindowToken(), 0);
             });
         } else {
+            tvStatus.setText("第1步/3 已启动：再按一次触发键 = 长按空格说话；说完再按一次 = 发送到电脑");
             et.requestFocus();
             et.postDelayed(() -> {
                 InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
