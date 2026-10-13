@@ -49,6 +49,14 @@ public class MainActivity extends Activity {
     private final Handler h = new Handler(Looper.getMainLooper());
     private Config cfg;
     private boolean sending = false;
+
+    /**
+     * 输入区固定高度（dp）。刻意写死而不依赖 WRAP_CONTENT：
+     * inputWrap 内含 ALIGN_PARENT_BOTTOM 的状态点，WRAP_CONTENT 高度在该组合下无法
+     * 收敛，会膨胀到占满父容器，把下方 weight=1 的按钮区挤成 0 高度。
+     * 三个按钮需要约 3*38 + 2*16 = 146dp，此值保证两者都放得下。
+     */
+    private static final int INPUT_WRAP_DP = 120;
     /** 局域网模式未连接时，最多自动搜索连接一次 */
     private boolean lanAutoScanned = false;
     /** 模拟空格“松开”后置位：等讯飞出字后立即发送（优先于普通自动发送） */
@@ -105,15 +113,25 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         // ---- 输入框 + 右下角状态点 + 异常箭头 ----
+        // 注意：这里【不能】用 WRAP_CONTENT。inputWrap 内含 ALIGN_PARENT_BOTTOM 的
+        // statusDot，而 RelativeLayout 在 WRAP_CONTENT 高度下无法确定自身尺寸，
+        // 会把 ALIGN_PARENT_BOTTOM 子项按父容器全高摆放，导致 inputWrap 膨胀到占满
+        // 整个可用高度（在 vivo Funtouch OS 等 ROM 上尤其明显）。一旦膨胀，
+        // 下面 weight=1 的 side 就只能分到 0 高度，三个按钮被压成一条线、完全不可见。
+        // 因此这里给 inputWrap 一个【明确的高度】，从根上切断这条传导链。
         RelativeLayout inputWrap = new RelativeLayout(this);
-        inputWrap.setLayoutParams(new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        LinearLayout.LayoutParams iwlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, Ui.dp(this, INPUT_WRAP_DP));
+        inputWrap.setLayoutParams(iwlp);
 
         et = Ui.inputField(this, "语音识别出的文字会落这里；也可手动输入");
         et.setMinLines(3);
         et.setGravity(Gravity.TOP);
+        // 填满 inputWrap 的固定高度（MATCH_PARENT + MATCH_PARENT），
+        // 不再用 WRAP_CONTENT，避免与 statusDot 的 ALIGN_PARENT_BOTTOM 互相牵制。
         RelativeLayout.LayoutParams etp = new RelativeLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
+        etp.addRule(RelativeLayout.ALIGN_PARENT_TOP);
         et.setLayoutParams(etp);
         inputWrap.addView(et);
 
@@ -172,8 +190,12 @@ public class MainActivity extends Activity {
         // ---- 右侧可拖动按钮容器 ----
         side = new DragLayout(this);
         side.setConfig(cfg);
-        side.setLayoutParams(new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        // weight=1 占据输入框之下的全部剩余空间；同时设 minHeight 作为保险，
+        // 即使父容器高度异常，按钮容器也不会塌成 0 高度导致三个按钮不可见。
+        LinearLayout.LayoutParams sideLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
+        side.setLayoutParams(sideLp);
+        side.setMinimumHeight(Ui.dp(this, 200));
 
         int bs = Ui.dp(this, 38);
         btnSettings = Ui.iconButton(this, R.drawable.ic_gear, Ui.text2(this), 38);
