@@ -70,7 +70,7 @@ public class VoiceInputActivity extends Activity {
 
         Window w = getWindow();
         WindowManager.LayoutParams lp = w.getAttributes();
-        lp.gravity = Gravity.BOTTOM;
+        lp.gravity = Gravity.TOP;   // 窗口固定在顶部（键盘在底部不受影响）
         lp.width = ViewGroup.LayoutParams.MATCH_PARENT;
         lp.height = ViewGroup.LayoutParams.WRAP_CONTENT;
         w.setAttributes(lp);
@@ -117,7 +117,7 @@ public class VoiceInputActivity extends Activity {
                 if (imm != null) imm.hideSoftInputFromWindow(et.getWindowToken(), 0);
             });
         } else {
-            tvStatus.setText("第1步/3 已启动：再按一次触发键 = 长按空格说话；说完再按一次 = 发送到电脑");
+            tvStatus.setText("按一次触发键 = 长按空格开始说话；说完再按一次 = 松开并发送到电脑");
             et.requestFocus();
             et.postDelayed(() -> {
                 InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
