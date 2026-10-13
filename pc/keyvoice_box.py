@@ -343,9 +343,12 @@ class Box:
 
 
 def main():
-    print("KeyVoice 接收端  状态小窗 360x96 右上角置顶  端口 %d" % PORT)
-    print("adb 模式：  adb reverse tcp:%d tcp:%d" % (PORT, PORT))
-    print("局域网：手机点「搜索电脑」会自动连上本机")
+    try:  # pythonw（无控制台后台运行）下 stdout 为 None，print 会抛错
+        print("KeyVoice 接收端  状态小窗 360x96 右上角置顶  端口 %d" % PORT)
+        print("adb 模式：  adb reverse tcp:%d tcp:%d" % (PORT, PORT))
+        print("局域网：手机点「搜索电脑」会自动连上本机")
+    except Exception:
+        pass
     threading.Thread(target=udp_listen, args=(PORT,), daemon=True).start()
 
     root = tk.Tk()

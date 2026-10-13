@@ -8,6 +8,7 @@ import android.graphics.Rect;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.KeyEvent;
+import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityWindowInfo;
 
@@ -35,11 +36,9 @@ public class KeyTriggerService extends AccessibilityService {
     private static final long LONG_PRESS_MS = 700;
 
     private int holdState = S_IDLE;
-    private int pollCount = 0;
     private Rect pendingRect = null;
 
     private final Handler main = new Handler(Looper.getMainLooper());
-    private final Runnable pollTask = this::pollIme;
     private final Runnable pendingPressTask = this::pressPendingSpace;
 
     @Override
@@ -102,29 +101,18 @@ public class KeyTriggerService extends AccessibilityService {
                 break;
 
             case S_OPENED:
-                // 第2步：模拟长按空格
+                // 第2步：不等待检测，直接长按空格
                 holdState = S_WAIT_IME;
-                pollCount = 0;
                 Rect r = findImeBounds();
-                if (r != null) {
-                    pendingRect = r;
-                    main.postDelayed(pendingPressTask, PRESS_DELAY_MS);
-                } else {
-                    Trigger.toast(this, "第2步/3：正在等输入法弹出…");
-                    main.postDelayed(pollTask, 300);
-                }
+                if (r == null) r = fallbackKeyboardRect();   // 兜底：屏幕底部中心
+                pendingRect = r;
+                main.postDelayed(pendingPressTask, PRESS_DELAY_MS);
                 break;
 
             case S_WAIT_IME:
-                // 还在等输入法/延时中又按了一次：此刻能找到输入法就立即长按
-                Rect r2 = findImeBounds();
-                if (r2 != null) {
-                    main.removeCallbacks(pendingPressTask);
-                    pendingRect = r2;
-                    pressPendingSpace();
-                } else {
-                    Trigger.toast(this, "输入法还没弹出，稍等片刻再按");
-                }
+                // 延时期间又按了一次：立即执行长按
+                main.removeCallbacks(pendingPressTask);
+                pressPendingSpace();
                 break;
 
             case S_SPOKEN:
@@ -140,21 +128,20 @@ public class KeyTriggerService extends AccessibilityService {
         }
     }
 
-    private void pollIme() {
-        if (holdState != S_WAIT_IME) return;
-        Rect ime = findImeBounds();
-        if (ime == null) {
-            if (++pollCount >= 30) { // 约 9 秒还没弹出
-                holdState = S_IDLE;
-                Trigger.toast(this, "没等到输入法弹出，请手动长按空格说话，再按触发键发送");
-                return;
-            }
-            main.postDelayed(pollTask, 300);
-            return;
+    /** 拿不到键盘窗口时的兜底：屏幕底部中心（空格键通常在这里） */
+    private Rect fallbackKeyboardRect() {
+        try {
+            android.graphics.Point size = new android.graphics.Point();
+            WindowManager wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+            wm.getDefaultDisplay().getRealSize(size);
+            float d = getResources().getDisplayMetrics().density;
+            // 底部一排键：跳过导航栏(~48dp)，键高约 56dp
+            int bottom = (int) (size.y - 48 * d);
+            int top = (int) (bottom - 56 * d);
+            return new Rect(0, top, size.x, bottom);
+        } catch (Exception e) {
+            return new Rect(0, 0, 1080, 2200); // 极端情况：通用竖屏尺寸的底部
         }
-        // 输入法已弹出：等 1 秒让键盘完全展开、布局稳定，再模拟长按空格
-        pendingRect = ime;
-        main.postDelayed(pendingPressTask, PRESS_DELAY_MS);
     }
 
     /** 找输入法窗口在屏幕上的位置；找不到返回 null */
