@@ -4,13 +4,19 @@ import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.GestureDescription;
 import android.content.Intent;
 import android.graphics.Path;
+import android.graphics.PixelFormat;
 import android.graphics.Rect;
 import android.os.Handler;
 import android.os.Looper;
+import android.view.Gravity;
 import android.view.KeyEvent;
+import android.view.MotionEvent;
+import android.view.View;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityWindowInfo;
+import android.widget.FrameLayout;
+import android.widget.TextView;
 
 /**
  * 捕获实体按键（默认音量减键，可用「学习按键」改绑）。
@@ -43,6 +49,22 @@ public class KeyTriggerService extends AccessibilityService {
 
     /** 供输入窗口查询：是否正在“按住空格”录音中（期间禁止自动发送打断） */
     public static volatile boolean holding = false;
+
+    public static KeyTriggerService instance;
+    private View shieldView;
+    private float twoFingerStartY = 0f;
+
+    @Override
+    public void onServiceConnected() {
+        instance = this;
+    }
+
+    @Override
+    public boolean onUnbind(Intent intent) {
+        hideShield();
+        instance = null;
+        return super.onUnbind(intent);
+    }
 
     private int holdState = S_IDLE;
     private Rect pendingRect = null;
@@ -285,8 +307,99 @@ public class KeyTriggerService extends AccessibilityService {
     @Override
     public void onDestroy() {
         holding = false;
+        hideShield();
+        instance = null;
         main.removeCallbacksAndMessages(null);
         super.onDestroy();
+    }
+
+    // ---------- 遮蔽听写模式：盖住键盘以上区域防误碰，双指下滑退出 ----------
+
+    /** App 主界面按钮入口：打开输入窗口 -> 等输入法弹出 -> 盖上遮罩 */
+    void startShieldMode() {
+        Trigger.openInputUi(this);
+        main.postDelayed(this::showShield, 1800); // 留时间弹输入法
+    }
+
+    private void showShield() {
+        if (shieldView != null) return;
+        try {
+            WindowManager wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+            android.graphics.Point size = new android.graphics.Point();
+            wm.getDefaultDisplay().getRealSize(size);
+            // 键盘区域必须留出来：模拟长按空格的手势要落在键盘上
+            Rect ime = findImeBounds();
+            int coverBottom;
+            if (ime != null && ime.top > size.y / 4) {
+                coverBottom = ime.top;
+            } else {
+                coverBottom = (int) (size.y * 0.55f); // 没找到键盘就盖上面 55%
+            }
+
+            FrameLayout wrap = new FrameLayout(this);
+            TextView hint = new TextView(this);
+            hint.setText("已遮蔽防误碰（键盘区域除外）\n物理键听写照常可用\n\n双指下滑退出");
+            hint.setTextColor(0xFFFFFFFF);
+            hint.setTextSize(15);
+            hint.setGravity(Gravity.CENTER);
+            wrap.addView(hint, new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    Gravity.CENTER));
+            wrap.setBackgroundColor(0x88000000);
+            wrap.setOnTouchListener(this::onShieldTouch);
+
+            WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
+                    WindowManager.LayoutParams.MATCH_PARENT, coverBottom,
+                    WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                            | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                    PixelFormat.TRANSLUCENT);
+            lp.gravity = Gravity.TOP;
+            wm.addView(wrap, lp);
+            shieldView = wrap;
+            Trigger.toast(this, "已进入遮蔽模式：双指下滑退出");
+        } catch (Exception e) {
+            Trigger.toast(this, "遮罩启动失败：" + e.getMessage());
+        }
+    }
+
+    /** 遮罩触摸处理：吞掉一切触摸防误碰；识别到双指下滑 140px 则退出 */
+    private boolean onShieldTouch(View v, MotionEvent ev) {
+        switch (ev.getActionMasked()) {
+            case MotionEvent.ACTION_POINTER_DOWN:
+                if (ev.getPointerCount() >= 2) {
+                    twoFingerStartY = (ev.getY(0) + ev.getY(1)) / 2f;
+                }
+                break;
+            case MotionEvent.ACTION_MOVE:
+                if (ev.getPointerCount() >= 2 && twoFingerStartY > 0) {
+                    float dy = (ev.getY(0) + ev.getY(1)) / 2f - twoFingerStartY;
+                    if (dy > 140) {
+                        hideShield();
+                        Trigger.toast(this, "已退出遮蔽模式");
+                        return true;
+                    }
+                }
+                break;
+            case MotionEvent.ACTION_POINTER_UP:
+            case MotionEvent.ACTION_CANCEL:
+                if (ev.getPointerCount() < 2) twoFingerStartY = 0f;
+                break;
+        }
+        return true; // 吞掉所有触摸
+    }
+
+    void hideShield() {
+        if (shieldView != null) {
+            try {
+                WindowManager wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+                wm.removeView(shieldView);
+            } catch (Exception ignored) {
+            }
+            shieldView = null;
+        }
+        twoFingerStartY = 0f;
     }
 
     @Override

@@ -165,6 +165,24 @@ public class MainActivity extends Activity {
         cbKeepScreen = check("听写时点亮屏幕（锁屏触发也能识别）", cfg.keepScreen());
         root.addView(cbKeepScreen);
 
+        // ---- vivo 侧边 AI 键
+        root.addView(title("vivo 侧边 AI 键（替代音量减）"));
+        root.addView(label("① 先点上方「学习按键」，再按手机侧边 AI 键：提示“已绑定按键”即可直接用（每次按侧边键 = 开始/发送听写）。\n"
+                + "② 若学不到（部分系统不把侧边键派发给应用）：打开「设置 → 快捷与辅助」，找「快捷启动 / Jovi 按键」入口，把侧边键动作设为「打开应用 → KeyVoice」。"
+                + "这样按侧边键会直接打开听写窗口，再用音量减键开始/发送。"));
+
+        // ---- 遮蔽听写（防误碰）
+        root.addView(title("遮蔽听写（防误碰）"));
+        root.addView(button("启动听写遮蔽模式（双指下滑退出）", v -> {
+            if (KeyTriggerService.instance != null) {
+                KeyTriggerService.instance.startShieldMode();
+                Toast.makeText(this, "正在打开听写窗口并盖上遮罩…", Toast.LENGTH_SHORT).show();
+            } else {
+                Toast.makeText(this, "请先开启无障碍服务（触发方式里有入口）", Toast.LENGTH_LONG).show();
+            }
+        }));
+        root.addView(label("遮罩盖住键盘以上区域防误碰；物理键照常可用：按一次=按住空格说话，再按一次=松开发送到电脑。双指下滑退出遮罩。"));
+
         root.addView(title("锁屏怎么用"));
         root.addView(label("锁屏下物理键系统不派发，请用这两种方式触发：\n"
                 + "① 下拉通知栏点本服务的「听写/停止」按钮（锁屏可直接点）；\n"
