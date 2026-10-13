@@ -34,6 +34,11 @@ public class KeyTriggerService extends AccessibilityService {
     private float holdX, holdY;
     private int pollCount = 0;
 
+    /** 输入法窗口找到后，先等 1 秒（等键盘动画/布局稳定）再按住空格 */
+    private static final long PRESS_DELAY_MS = 1000;
+    private Rect pendingRect = null;
+    private final Runnable pendingPressTask = this::pressPendingSpace;
+
     private final Handler main = new Handler(Looper.getMainLooper());
 
     private final Runnable holdTimeoutTask = this::holdTimeout;
@@ -113,6 +118,11 @@ public class KeyTriggerService extends AccessibilityService {
                 break;
 
             case S_WAIT_IME:
+                if (pendingRect != null) {
+                    // 正在等 1 秒后按住空格：这次按键忽略，避免把即将开始的按住打断
+                    Trigger.toast(this, "即将按住空格，请说话；说完再按一次触发键发送");
+                    break;
+                }
                 // 输入法还没等到就又按了一次：放弃模拟，交给手动
                 holdState = S_IDLE;
                 main.removeCallbacks(pollTask);
@@ -137,7 +147,16 @@ public class KeyTriggerService extends AccessibilityService {
             main.postDelayed(pollTask, 200);
             return;
         }
-        pressSpaceHold(ime);
+        // 输入法已弹出：等 1 秒让键盘完全展开、布局稳定，再按住空格
+        pendingRect = ime;
+        main.postDelayed(pendingPressTask, PRESS_DELAY_MS);
+    }
+
+    private void pressPendingSpace() {
+        if (holdState != S_WAIT_IME || pendingRect == null) return;
+        Rect r = pendingRect;
+        pendingRect = null;
+        pressSpaceHold(r);
     }
 
     /** 找输入法窗口在屏幕上的位置；找不到返回 null */
