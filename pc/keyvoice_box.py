@@ -91,6 +91,12 @@ k32.GetCurrentThreadId.argtypes = []
 k32.GetCurrentThreadId.restype = ctypes.c_ulong
 u32.AttachThreadInput.argtypes = [ctypes.c_ulong, ctypes.c_ulong, ctypes.c_int]
 u32.AttachThreadInput.restype = ctypes.c_int
+u32.AllowSetForegroundWindow.argtypes = [ctypes.c_uint]
+u32.AllowSetForegroundWindow.restype = ctypes.c_int
+u32.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
+u32.ShowWindow.restype = ctypes.c_int
+u32.SetFocus.argtypes = [ctypes.c_void_p]
+u32.SetFocus.restype = ctypes.c_void_p
 
 GUI_CARETBLINKING = 0x0001
 CF_UNICODETEXT = 13
@@ -121,15 +127,26 @@ def has_caret():
 
 
 def focus_external(hwnd):
-    """把前台焦点还给指定的外部窗口（让 Ctrl+V 打到它身上）"""
+    """把前台焦点切到指定的外部窗口（让 Ctrl+V 打到它身上）。
+
+    现代 Windows 对 SetForegroundWindow 限制很严：后台进程直接调用常常被静默忽略，
+    导致 Ctrl+V 打到了 Python 自己的状态窗而不是目标程序。这里用三板斧强行拉前台：
+    AllowSetForegroundWindow(ANY) + ShowWindow(SW_RESTORE) + AttachThreadInput + SetForegroundWindow + SetFocus。
+    """
     if not hwnd:
         return False
     try:
         pid = ctypes.c_ulong()
         tgt = u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
         cur = k32.GetCurrentThreadId()
+        try:
+            u32.AllowSetForegroundWindow(0)  # ASFW_ANY：放行任意进程设置前台
+        except Exception:
+            pass
+        u32.ShowWindow(hwnd, 9)  # SW_RESTORE：先还原（最小化/隐藏的窗口也能拉起）
         u32.AttachThreadInput(cur, tgt, True)
         u32.SetForegroundWindow(hwnd)
+        u32.SetFocus(hwnd)
         u32.AttachThreadInput(cur, tgt, False)
         return True
     except Exception:
@@ -139,18 +156,24 @@ def focus_external(hwnd):
 # ------------------------------------------------------------------ 剪贴板
 
 def set_clipboard(text):
+    """写入系统剪贴板（带重试，避免别的程序临时占用剪贴板导致写入失败）"""
     data = text.encode("utf-16-le") + b"\x00\x00"
-    if not u32.OpenClipboard(None):
-        return False
-    try:
-        u32.EmptyClipboard()
-        h = k32.GlobalAlloc(0x0002, len(data))
-        p = k32.GlobalLock(h)
-        ctypes.memmove(p, data, len(data))
-        k32.GlobalUnlock(h)
-        return bool(u32.SetClipboardData(CF_UNICODETEXT, h))
-    finally:
-        u32.CloseClipboard()
+    for _ in range(6):
+        if u32.OpenClipboard(None):
+            try:
+                u32.EmptyClipboard()
+                h = k32.GlobalAlloc(0x0002, len(data))
+                if not h:
+                    return False
+                p = k32.GlobalLock(h)
+                ctypes.memmove(p, data, len(data))
+                k32.GlobalUnlock(h)
+                if u32.SetClipboardData(CF_UNICODETEXT, h):
+                    return True
+            finally:
+                u32.CloseClipboard()
+        time.sleep(0.02)
+    return False
 
 
 def press_ctrl_v():
@@ -315,29 +338,39 @@ class Box:
         self.var_status.set("已连接 · 收到 %d 条 · 端口 %d" % (self.count, self.port))
         self.var_last.set("最近收到：%s" % text)
 
-        set_clipboard(text)
+        ok = set_clipboard(text)
+        if not ok:
+            self.toast("剪贴板被占用，写入失败（请稍后再试）")
+            self.flash_popup(text)
+            return
         # 先上屏、后弹提示（弹窗会抢焦点，顺序不能反）
         if self.var_auto.get() and self._paste_to_foreign():
-            self.toast("已上屏到当前输入框")
+            self.toast("已上屏到当前光标处")
         else:
-            self.toast("已存剪贴板（未上屏，点一下目标输入框再发即可 Ctrl+V）")
+            self.toast("已存剪贴板（先点一下目标输入框，再发即可 Ctrl+V）")
         self.flash_popup(text)
 
     def _paste_to_foreign(self):
-        """上屏到外部应用：优先当前前台窗口，其次还原到最近使用的外部窗口"""
+        """上屏到外部应用的输入框：优先“最近使用的外部窗口”，其次当前前台窗口。
+        选好目标后强制拉到前台并聚焦，确认前台确实是外部窗口再 Ctrl+V。"""
+        tgt = None
+        if self.last_external and self._foreign(self.last_external):
+            tgt = self.last_external
         fg = u32.GetForegroundWindow()
-        if self._foreign(fg):
-            time.sleep(0.03)
-            press_ctrl_v()
-            return True
-        tgt = self.last_external
-        if tgt and self._foreign(tgt):
+        if tgt is None and self._foreign(fg):
+            tgt = fg
+        if tgt is None:
+            return False
+        # 把目标窗口拉前台（多试几次，前台窗口有时一次设不上）
+        for _ in range(4):
             focus_external(tgt)
-            time.sleep(0.06)
-            if self._foreign(u32.GetForegroundWindow()):
-                press_ctrl_v()
-                return True
-        return False
+            time.sleep(0.08)
+            cur = u32.GetForegroundWindow()
+            if self._foreign(cur):
+                break
+        time.sleep(0.05)
+        press_ctrl_v()
+        return True
 
     # 收到文字时的小弹窗提示（2.5 秒后自动消失，不抢焦点）
     def flash_popup(self, text):
@@ -345,6 +378,7 @@ class Box:
             tip = tk.Toplevel(self.root)
             tip.wm_overrideredirect(True)
             tip.attributes("-topmost", True)
+            tip.takefocus = False   # 不抢焦点，避免影响下一次上屏的目标窗口
             tip.configure(bg=BG, highlightbackground=BORDER, highlightthickness=1)
             tk.Label(tip, text="收到语音文字", bg=BG, fg=ACCENT,
                      font=FONT_SM).pack(anchor="w", padx=12, pady=(8, 0))

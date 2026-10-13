@@ -34,6 +34,8 @@ public class KeyTriggerService extends AccessibilityService {
     private static final int MAX_RETRY = 6;
     /** 最长按住 55 秒，防止虚拟指针卡死 */
     private static final long HOLD_TIMEOUT_MS = 55_000;
+    /** 松开时若手势还没被系统确认，最多重试次数（约 3 秒），超时就强制复位，避免 holdState 卡死导致「下次长按失效」 */
+    private static final int MAX_RELEASE_TRIES = 20;
 
     /** 供 UI 查询：是否正在“按住空格”录音中 */
     public static volatile boolean holding = false;
@@ -43,6 +45,7 @@ public class KeyTriggerService extends AccessibilityService {
     private int holdState = S_IDLE;
     private Rect pendingRect = null;
     private int imeRetries = 0;
+    private int releaseTries = 0;
 
     private GestureDescription.StrokeDescription holdStroke;
     private boolean holdReady = false;
@@ -81,15 +84,25 @@ public class KeyTriggerService extends AccessibilityService {
     public boolean beginHoldFromUi() {
         if (holdState != S_IDLE) return false;
         holdState = S_PENDING;
+        holdReady = false;      // 新一轮：先置为未就绪，等新手势确认
+        releaseTries = 0;
         imeRetries = 0;
         Trigger.toast(this, "等待输入法弹出…");
         main.postDelayed(waitTask, WAIT_IME_MS);
         return true;
     }
 
-    /** 正在按住中则立即松开（UI 二次点击 / 超时兜底） */
+    /** 正在按住中则立即松开；仍在等待输入法弹出则直接取消（UI 二次点击 / 超时兜底） */
     public void endHold() {
-        if (holdState == S_HOLDING) releaseAndSend();
+        if (holdState == S_HOLDING) {
+            releaseAndSend();
+        } else if (holdState == S_PENDING) {
+            main.removeCallbacks(waitTask);
+            main.removeCallbacks(pendingPressTask);
+            holdState = S_IDLE;
+            holdReady = false;
+            Trigger.toast(this, "已取消本次长按");
+        }
     }
 
     // ---------- 按住 / 松开 ----------
@@ -210,8 +223,9 @@ public class KeyTriggerService extends AccessibilityService {
         holding = false;
         if (holdState == S_HOLDING && holdStroke != null) {
             try {
-                if (!holdReady) {
-                    // 当前段还没被系统确认完，稍等再松开
+                if (!holdReady && releaseTries < MAX_RELEASE_TRIES) {
+                    // 当前段还没被系统确认完，稍等再松开（重试次数封顶，超时就强制复位）
+                    releaseTries++;
                     main.postDelayed(this::releaseAndSend, 150);
                     return;
                 }
@@ -224,8 +238,10 @@ public class KeyTriggerService extends AccessibilityService {
             } catch (Exception ignored) {
             }
         }
+        // 无论上面是否成功，都强制复位状态，防止 holdState 卡在 S_HOLDING 导致下次长按失效
         holdStroke = null;
         holdState = S_IDLE;
+        releaseTries = 0;
         Trigger.toast(this, "已松开，等识别出字后自动发送…");
         // 给讯飞留出把文字写进输入框的时间；UI 收到 COMMIT 后自行发送
         main.postDelayed(() -> sendBroadcast(

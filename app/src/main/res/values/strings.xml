@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">按键语音</string>
-    <string name="service_label">按键语音 · 按键监听</string>
+    <string name="service_label">a</string>
     <string name="tile_label">语音输入</string>
 </resources>

@@ -136,4 +136,12 @@ public class Config {
     /** ime 模式下模拟“按住空格”：第一次按物理键=按住讯飞空格开始语音，再按一次=松开并自动发送 */
     public boolean imeHold() { return sp.getBoolean("ime_hold", true); }
     public void imeHold(boolean v) { sp.edit().putBoolean("ime_hold", v).apply(); }
+
+    /** 首次启动的权限引导是否已经完成（完成一次后不再自动弹） */
+    public boolean onboarded() { return sp.getBoolean("onboarded", false); }
+    public void onboarded(boolean v) { sp.edit().putBoolean("onboarded", v).apply(); }
+
+    /** 主页面三个按钮的布局：JSON {"s":[fx,fy,scale],"h":[...],"e":[...]}（归一化坐标） */
+    public String layoutJson() { return sp.getString("layout", ""); }
+    public void layoutJson(String v) { sp.edit().putString("layout", v).apply(); }
 }

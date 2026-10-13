@@ -10,6 +10,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.ImageButton;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
@@ -206,5 +207,30 @@ public final class Ui {
         v.setLayoutParams(new LinearLayout.LayoutParams(d, d));
         v.setBackground(round(color, 0, 0, (float) d / 2f));
         return v;
+    }
+
+    /** 把颜色按 f 比例调亮(f>0)/调暗(f<0)，用于按钮按下态。f ∈ (-1,1) */
+    public static int shade(int color, float f) {
+        int r = Color.red(color), g = Color.green(color), b = Color.blue(color);
+        if (f < 0) { float k = 1 + f; r = (int) (r * k); g = (int) (g * k); b = (int) (b * k); }
+        else { r += (int) ((255 - r) * f); g += (int) ((255 - g) * f); b += (int) ((255 - b) * f); }
+        return Color.argb(Color.alpha(color), clamp(r), clamp(g), clamp(b));
+    }
+
+    private static int clamp(int v) { return Math.max(0, Math.min(255, v)); }
+
+    /** 圆形图标按钮：固定直径 diameterDp（0.3cm 半径≈38dp），背景 bgColor，图标白色居中 */
+    public static ImageButton iconButton(Context c, int iconRes, int bgColor, int diameterDp) {
+        ImageButton b = new ImageButton(c);
+        b.setImageResource(iconRes);
+        b.setColorFilter(Color.WHITE);
+        b.setScaleType(ImageButton.ScaleType.CENTER_INSIDE);
+        b.setBackground(buttonBg(bgColor, shade(bgColor, -0.28f), (float) dp(c, diameterDp) / 2f));
+        int pad = dp(c, Math.max(8, diameterDp / 4));
+        b.setPadding(pad, pad, pad, pad);
+        int s = dp(c, diameterDp);
+        b.setLayoutParams(new ViewGroup.LayoutParams(s, s));
+        b.setContentDescription("");
+        return b;
     }
 }

@@ -94,9 +94,9 @@ public class SettingsActivity extends Activity {
         etPort.setLayoutParams(plp);
         c2.addView(etPort);
         LinearLayout row1 = Ui.row(this);
-        Button bScan = Ui.ghostButton(this, "搜索电脑"); bScan.setOnClickListener(v -> scanPc());
+        btnScan = Ui.ghostButton(this, "搜索电脑"); btnScan.setOnClickListener(v -> scanPc());
         Button bTest = Ui.ghostButton(this, "测试发送"); bTest.setOnClickListener(v -> testSend());
-        addWeighted(row1, bScan, bTest);
+        addWeighted(row1, btnScan, bTest);
         c2.addView(row1);
         root.addView(c2);
 
@@ -105,7 +105,7 @@ public class SettingsActivity extends Activity {
         c3.addView(Ui.sectionTitle(this, "语音来源"));
         rgMode = new RadioGroup(this);
         RadioButton rbIme = new RadioButton(this); rbIme.setId(1);
-        rbIme.setText("用手机装的输入法（讯飞）语音输入（主页面「模拟长按」用）");
+        rbIme.setText("用手机装的输入法（讯飞）语音输入：主页面「模拟长按」=按住说话，「电脑上屏」=松开并发送");
         RadioButton rbSr = new RadioButton(this); rbSr.setId(2);
         rbSr.setText("直接调用识别服务（通知栏/媒体键触发，可灭屏）");
         styleRadio(rbIme); styleRadio(rbSr);
@@ -161,7 +161,7 @@ public class SettingsActivity extends Activity {
         // ---- 其它 ----
         LinearLayout c7 = Ui.sectionCard(this);
         c7.addView(Ui.sectionTitle(this, "其它"));
-        cbAutoSend = check("识别出字后自动发送到电脑（关掉则手动点「电脑上屏」）", cfg.autoSend()); c7.addView(cbAutoSend);
+        cbAutoSend = check("识别服务模式：出字后自动发送（关掉则手动点「电脑上屏」）；输入法模式由「电脑上屏」按钮负责松开并发送", cfg.autoSend()); c7.addView(cbAutoSend);
         cbAutoClose = check("发送成功后自动关闭听写窗口", cfg.autoClose()); c7.addView(cbAutoClose);
         cbNewline = check("文字末尾追加回车", cfg.addNewline()); c7.addView(cbNewline);
         Button bMic = Ui.ghostButton(this, "授予麦克风权限（识别服务模式需要）");
@@ -177,12 +177,6 @@ public class SettingsActivity extends Activity {
 
         applyTransport();
         refresh();
-
-        // 默认局域网：没填过电脑 IP 就打开即自动扫描
-        if (!cfg.adbMode() && cfg.host().isEmpty()) {
-            tvInfo.setText("局域网模式：正在自动扫描电脑…");
-            etPort.postDelayed(this::scanPc, 600);
-        }
     }
 
     // ------------------------------------------------------- 权限自动跳转
@@ -217,7 +211,7 @@ public class SettingsActivity extends Activity {
             return;
         }
         if (!accEnabled()) {
-            tvInfo.setText("权限引导 2/3：请打开「按键语音 · 按键监听」开关后返回，会自动继续…");
+            tvInfo.setText("权限引导 2/3：请打开名为「a」的无障碍开关后返回，会自动继续…");
             try {
                 startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
             } catch (Exception ignored) { }
@@ -284,6 +278,11 @@ public class SettingsActivity extends Activity {
         tvAdbHint.setText(adb
                 ? "电脑端先执行一次（手机插着 USB）：\n  adb reverse tcp:" + port + " tcp:" + port + "\n然后手机就能发到电脑，全程不走局域网。"
                 : "局域网模式：手机与电脑要在同一个 WiFi。");
+        // 选了局域网且还没连上：自动搜索并连接电脑
+        if (!adb && cfg.host().isEmpty()) {
+            tvInfo.setText("局域网模式：正在自动搜索电脑…");
+            etPort.postDelayed(this::scanPc, 600);
+        }
     }
 
     private void loadEngines() {
@@ -299,7 +298,8 @@ public class SettingsActivity extends Activity {
             for (ResolveInfo ri : list) {
                 if (ri.serviceInfo == null) continue;
                 ComponentName cn = new ComponentName(ri.serviceInfo.packageName, ri.serviceInfo.name);
-                CharSequence l = ri.loadLabel(pm);
+                CharSequence l = null;
+                try { l = ri.loadLabel(pm); } catch (Exception ignored) { }
                 String label = l != null ? l.toString() : cn.getClassName();
                 if (cn.getPackageName().toLowerCase().contains("iflytek")) {
                     label = label + "（讯飞）";
@@ -403,6 +403,5 @@ public class SettingsActivity extends Activity {
     protected void onResume() {
         super.onResume();
         refresh();
-        if (needWizard()) wizardNext();  // 从设置页返回后自动进入下一项
     }
 }
