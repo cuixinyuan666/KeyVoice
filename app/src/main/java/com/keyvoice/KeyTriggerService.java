@@ -84,14 +84,14 @@ public class KeyTriggerService extends AccessibilityService {
         Config cfg = new Config(this);
         int code = event.getKeyCode();
 
-        // 学习模式：下一次按下的物理键被绑定为触发键
+        // 学习模式：按下的物理键追加为触发键（可绑定多个：音量减 + vivo 侧边键同时生效）
         if (cfg.learning()) {
-            if (event.getAction() == KeyEvent.ACTION_DOWN) {
-                cfg.triggerKey(code);
-                cfg.learning(false);
-                Trigger.toast(this, "已绑定按键：" + KeyEvent.keyCodeToString(code));
+            if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) {
+                cfg.addTriggerKey(code);
+                Trigger.toast(this, "已绑定按键：" + KeyEvent.keyCodeToString(code)
+                        + "（追加模式，可与其它触发键同时生效）");
             }
-            return true;
+            return true;   // 学习期间也吞掉，防止误触
         }
 
         // 忽略按键自动重复（长按触发键不松时系统会连发，曾导致“按住”被误松开）
@@ -99,8 +99,8 @@ public class KeyTriggerService extends AccessibilityService {
             return cfg.blockKey();
         }
 
-        int trigger = cfg.triggerKey();
-        if (trigger != 0 && code == trigger) {
+        // 命中任一已绑定触发键（音量减 / vivo 侧边键等，多键同时有效）
+        if (cfg.triggerKeys().contains(code)) {
             if (event.getAction() == KeyEvent.ACTION_DOWN) {
                 downAt = System.currentTimeMillis();
                 if ("ime".equals(cfg.mode()) && cfg.imeHold()) {
@@ -315,10 +315,35 @@ public class KeyTriggerService extends AccessibilityService {
 
     // ---------- 遮蔽听写模式：盖住键盘以上区域防误碰，双指下滑退出 ----------
 
-    /** App 主界面按钮入口：打开输入窗口 -> 等输入法弹出 -> 盖上遮罩 */
+    private int shieldWaitTries = 0;
+    private final Runnable shieldWaitTask = this::shieldWait;
+
+    /**
+     * App 主界面按钮入口：打开输入窗口 -> 强制聚焦输入框并弹输入法 ->
+     * **确认输入法真正弹出后**才盖遮罩（保证遮蔽前输入栏已就绪可听写）
+     */
     void startShieldMode() {
-        Trigger.openInputUi(this);
-        main.postDelayed(this::showShield, 1800); // 留时间弹输入法
+        Trigger.openInputUi(this, true);   // force_ime：聚焦输入框并触发输入法
+        hideShield();
+        shieldWaitTries = 0;
+        Trigger.toast(this, "正在打开听写窗口，等待输入法就绪…");
+        main.postDelayed(shieldWaitTask, 700);
+    }
+
+    /** 每 400ms 查一次输入法窗口；弹出后稳定 500ms 再盖遮罩；6 秒等不到则按默认位置盖 */
+    private void shieldWait() {
+        if (shieldView != null || VoiceInputActivity.instance == null) return;
+        Rect ime = findImeBounds();
+        if (ime != null) {
+            main.postDelayed(this::showShield, 500);   // 输入法已就绪，稳定一下再盖
+            return;
+        }
+        if (++shieldWaitTries <= 15) {
+            main.postDelayed(shieldWaitTask, 400);
+            return;
+        }
+        Trigger.toast(this, "没等到输入法弹出，遮罩按默认位置盖上（键盘区域仍留空）");
+        showShield();
     }
 
     private void showShield() {

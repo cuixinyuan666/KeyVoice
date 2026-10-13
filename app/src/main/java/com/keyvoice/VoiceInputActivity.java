@@ -109,7 +109,8 @@ public class VoiceInputActivity extends Activity {
         registerReceiver(commit, new IntentFilter("com.keyvoice.COMMIT"));
         registerReceiver(result, new IntentFilter(VoiceService.ACTION_RESULT));
 
-        if ("sr".equals(cfg.mode())) {
+        boolean forceIme = getIntent().getBooleanExtra("force_ime", false);
+        if ("sr".equals(cfg.mode()) && !forceIme) {
             // 交给识别服务，自己只做展示（结果通过广播回来）
             tvStatus.setText("正在调用识别服务（可灭屏）…");
             VoiceService.startListening(this);
@@ -118,7 +119,10 @@ public class VoiceInputActivity extends Activity {
                 if (imm != null) imm.hideSoftInputFromWindow(et.getWindowToken(), 0);
             });
         } else {
-            tvStatus.setText("按一次触发键 = 长按空格开始说话；说完再按一次 = 松开并发送到电脑");
+            // 聚焦输入框并触发输入法（遮蔽模式 / 输入法模式都走这里，保证输入栏就绪）
+            tvStatus.setText(forceIme
+                    ? "遮蔽听写：输入框已聚焦、输入法弹出后自动盖遮罩；物理键 = 按住空格说话 / 松开发送"
+                    : "按一次触发键 = 长按空格开始说话；说完再按一次 = 松开并发送到电脑");
             et.requestFocus();
             et.postDelayed(() -> {
                 InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);

@@ -58,6 +58,46 @@ public class Config {
     public int triggerKey() { return sp.getInt("trigger_key", 25); }
     public void triggerKey(int v) { sp.edit().putInt("trigger_key", v).apply(); }
 
+    /** 触发键列表（逗号分隔）。默认 [音量减]；可学习追加（如 vivo 侧边 AI 键），多键同时生效、同时屏蔽原功能 */
+    public java.util.List<Integer> triggerKeys() {
+        java.util.List<Integer> out = new java.util.ArrayList<>();
+        String s = sp.getString("trigger_keys", "");
+        if (!s.isEmpty()) {
+            for (String p : s.split(",")) {
+                try {
+                    int v = Integer.parseInt(p.trim());
+                    if (v != 0 && !out.contains(v)) out.add(v);
+                } catch (Exception ignored) {
+                }
+            }
+        }
+        if (out.isEmpty()) out.add(triggerKey() != 0 ? triggerKey() : 25);
+        return out;
+    }
+
+    public void setTriggerKeys(java.util.List<Integer> keys) {
+        StringBuilder sb = new StringBuilder();
+        for (int k : keys) {
+            if (sb.length() > 0) sb.append(',');
+            sb.append(k);
+        }
+        sp.edit().putString("trigger_keys", sb.toString())
+                .putInt("trigger_key", keys.isEmpty() ? 25 : keys.get(0))
+                .apply();
+    }
+
+    /** 追加一个触发键（已存在则不变） */
+    public void addTriggerKey(int code) {
+        java.util.List<Integer> ks = triggerKeys();
+        if (!ks.contains(code)) ks.add(code);
+        setTriggerKeys(ks);
+    }
+
+    /** 重置为默认：仅音量减键 */
+    public void resetTriggerKeys() {
+        setTriggerKeys(new java.util.ArrayList<>(java.util.Collections.singletonList(25)));
+    }
+
     public boolean longPress() { return sp.getBoolean("long_press", false); }
     public void longPress(boolean v) { sp.edit().putBoolean("long_press", v).apply(); }
 

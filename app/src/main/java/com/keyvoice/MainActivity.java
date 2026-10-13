@@ -129,16 +129,18 @@ public class MainActivity extends Activity {
 
         // ---- 触发方式
         root.addView(title("触发方式"));
-        tvTrigger = label("当前触发键：" + keyName(cfg.triggerKey()));
+        tvTrigger = label(triggerText());
         root.addView(tvTrigger);
 
         LinearLayout row2 = row();
-        row2.addView(button("学习按键", v -> learnKey()));
+        row2.addView(button("学习按键（追加绑定）", v -> learnKey()));
         row2.addView(button("清除按键", v -> {
-            cfg.triggerKey(25);   // 恢复默认：音量减键
-            tvTrigger.setText("当前触发键：" + keyName(cfg.triggerKey()));
+            cfg.resetTriggerKeys();   // 恢复默认：仅音量减键
+            tvTrigger.setText(triggerText());
         }));
         root.addView(row2);
+        root.addView(label("学习按键为「追加」模式：可以依次把音量减、vivo 侧边 AI 键等多个键都绑上，全部同时生效；\n"
+                + "开启「屏蔽触发键原功能」后，被绑定的键在 App 运行期间不再执行原功能（音量不调、AI 侧边栏不弹）。"));
 
         root.addView(button("打开系统无障碍设置（实体键触发必开）", v ->
                 startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))));
@@ -166,10 +168,13 @@ public class MainActivity extends Activity {
         root.addView(cbKeepScreen);
 
         // ---- vivo 侧边 AI 键
-        root.addView(title("vivo 侧边 AI 键（替代音量减）"));
-        root.addView(label("① 先点上方「学习按键」，再按手机侧边 AI 键：提示“已绑定按键”即可直接用（每次按侧边键 = 开始/发送听写）。\n"
-                + "② 若学不到（部分系统不把侧边键派发给应用）：打开「设置 → 快捷与辅助」，找「快捷启动 / Jovi 按键」入口，把侧边键动作设为「打开应用 → KeyVoice」。"
-                + "这样按侧边键会直接打开听写窗口，再用音量减键开始/发送。"));
+        root.addView(title("vivo 侧边 AI 键（与音量减同时有效）"));
+        root.addView(label("推荐组合用法（当前阶段两键并存）：\n"
+                + "① 先点上方「学习按键（追加绑定）」→ 按侧边 AI 键：绑定成功后，侧边键与音量减**同时**作为触发键，\n"
+                + "   且开启屏蔽后侧边键不再弹出 AI 侧边栏（前提：按键事件能派发给无障碍服务）。\n"
+                + "② 若学不到（系统拦截不派发）：「设置 → 快捷与辅助 → 快捷启动 / Jovi 按键」→ 动作设为「打开应用 → KeyVoice」，\n"
+                + "   这一步本身就是用本 App **替换**了 AI 侧边栏的原始功能；按侧边键开听写窗口，音量减做开始/发送。\n"
+                + "※ 若侧边键绑定后原功能仍会触发，说明该键被系统在派发前拦截，无 root 无法彻底屏蔽，请用方案②替换。"));
 
         // ---- 遮蔽听写（防误碰）
         root.addView(title("遮蔽听写（防误碰）"));
@@ -391,13 +396,13 @@ public class MainActivity extends Activity {
 
     private void learnKey() {
         cfg.learning(true);
-        tvTrigger.setText("请按下要绑定的实体键…");
-        Toast.makeText(this, "按下你要用作触发键的实体按键", Toast.LENGTH_LONG).show();
+        tvTrigger.setText("请按下要绑定的实体键…（追加模式：新键会加进触发键列表）");
+        Toast.makeText(this, "按下你要追加的实体按键（可多次进入本模式绑多个键）", Toast.LENGTH_LONG).show();
         new android.os.Handler(getMainLooper()).postDelayed(() -> {
-            cfg.learning(false);
-            refresh();
-            tvTrigger.setText("当前触发键：" + keyName(cfg.triggerKey())
-                    + (cfg.triggerKey() == 0 ? "（没学到，确认无障碍服务已开启）" : ""));
+            if (cfg.learning()) {
+                cfg.learning(false);
+                tvTrigger.setText(triggerText());
+            }
         }, 8000);
     }
 
@@ -426,10 +431,20 @@ public class MainActivity extends Activity {
     }
 
     private void refresh() {
-        tvTrigger.setText("当前触发键：" + keyName(cfg.triggerKey()));
+        tvTrigger.setText(triggerText());
         tvInfo.setText(VoiceService.running
                 ? "服务状态：运行中（灭屏可直接按键听写）"
                 : "服务状态：未运行。灭屏听写请先点「启动常驻服务」");
+    }
+
+    private String triggerText() {
+        StringBuilder sb = new StringBuilder("当前触发键（多键同时有效）：");
+        java.util.List<Integer> ks = cfg.triggerKeys();
+        for (int i = 0; i < ks.size(); i++) {
+            if (i > 0) sb.append("  +  ");
+            sb.append(keyName(ks.get(i)));
+        }
+        return sb.toString();
     }
 
     private static String keyName(int code) {
