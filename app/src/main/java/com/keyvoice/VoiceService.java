@@ -396,7 +396,9 @@ public class VoiceService extends Service {
                 .setContentText(text)
                 .setContentIntent(piOpen)
                 .setOngoing(true)
-                .setOnlyAlertOnce(true);
+                .setOnlyAlertOnce(true)
+                // 锁屏上也完整显示（含「听写/停止」按钮）—— 锁屏触发就靠它
+                .setVisibility(Notification.VISIBILITY_PUBLIC);
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             nb.addAction(new Notification.Action.Builder(

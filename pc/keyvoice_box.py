@@ -15,6 +15,7 @@ KeyVoice · Windows 10 接收端（状态小窗版）
 
 import ctypes
 import json
+import os
 import socket
 import sys
 import threading
@@ -242,14 +243,25 @@ class Box:
         self._start_focus_tracker()
         self.update_status()
 
-    # 跟踪"当前正在用的窗口"，上屏时把焦点还回去
+    # 跟踪"当前正在用的窗口"，上屏时把焦点还回去。
+    # 注意：必须按进程 ID 排除自己的窗口 —— tkinter winfo_id() 与 GetForegroundWindow
+    # 返回的不是同一个句柄，按句柄对比会把自己的窗口误当"外部窗口"。
+    def _foreign(self, hwnd):
+        if not hwnd:
+            return False
+        try:
+            pid = ctypes.c_ulong()
+            u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            return pid.value != os.getpid()
+        except Exception:
+            return False
+
     def _start_focus_tracker(self):
         def run():
-            my_hwnd = self.root.winfo_id()
             while True:
                 try:
                     hwnd = u32.GetForegroundWindow()
-                    if hwnd and hwnd != my_hwnd:
+                    if hwnd and self._foreign(hwnd):
                         self.last_external = hwnd
                 except Exception:
                     pass
@@ -265,17 +277,30 @@ class Box:
         # 状态：从"等待连接"切到"已连接"
         self.var_status.set("已连接 · 收到 %d 条 · 端口 %d" % (self.count, self.port))
         self.var_last.set("最近收到：%s" % text)
-        self.flash_popup(text)
 
         set_clipboard(text)
-        if self.var_auto.get():
-            # 还原你正在用的窗口焦点，再 Ctrl+V 上屏到任意输入框
-            focus_external(self.last_external)
-            time.sleep(0.05)
-            press_ctrl_v()
+        # 先上屏、后弹提示（弹窗会抢焦点，顺序不能反）
+        if self.var_auto.get() and self._paste_to_foreign():
             self.toast("已上屏到当前输入框")
         else:
-            self.toast("已存剪贴板（未上屏）")
+            self.toast("已存剪贴板（未上屏，点一下目标输入框再发即可 Ctrl+V）")
+        self.flash_popup(text)
+
+    def _paste_to_foreign(self):
+        """上屏到外部应用：优先当前前台窗口，其次还原到最近使用的外部窗口"""
+        fg = u32.GetForegroundWindow()
+        if self._foreign(fg):
+            time.sleep(0.03)
+            press_ctrl_v()
+            return True
+        tgt = self.last_external
+        if tgt and self._foreign(tgt):
+            focus_external(tgt)
+            time.sleep(0.06)
+            if self._foreign(u32.GetForegroundWindow()):
+                press_ctrl_v()
+                return True
+        return False
 
     # 收到文字时的小弹窗提示（2.5 秒后自动消失，不抢焦点）
     def flash_popup(self, text):

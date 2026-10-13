@@ -5,13 +5,24 @@ import android.net.wifi.WifiManager;
 
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
+import java.net.Inet4Address;
 import java.net.InetAddress;
+import java.net.InterfaceAddress;
 import java.net.InetSocketAddress;
+import java.net.NetworkInterface;
 import java.net.SocketTimeoutException;
+import java.nio.ByteBuffer;
+import java.util.Enumeration;
 import java.util.LinkedHashSet;
 import java.util.Set;
 
-/** 局域网自动发现：手机发 KEYVOICE_DISCOVER 广播，电脑接收端回 KEYVOICE_HELLO:<port> */
+/**
+ * 局域网自动发现：手机发 KEYVOICE_DISCOVER 广播，电脑接收端回 KEYVOICE_HELLO:<port>。
+ *
+ * 广播地址按每个网卡的子网定向广播计算（如 192.168.1.255），而不是只发 255.255.255.255：
+ * 开着 VPN 时，255.255.255.255 会被隧道劫走，定向广播则走物理网卡路由，能绕开 VPN。
+ * 隧道接口（tun/tap/ppp）本身会被排除。
+ */
 public class Discover {
 
     public static final int BEACON_PORT = 17891;
@@ -21,6 +32,56 @@ public class Discover {
     public interface Sink {
         void onFound(String ip, int port);
         void onDone(int count);
+    }
+
+    /** 是否开着 VPN（存在 tun/tap/ppp 接口）。VPN 会拦走广播，导致发现失败 */
+    public static boolean vpnActive() {
+        try {
+            Enumeration<NetworkInterface> nis = NetworkInterface.getNetworkInterfaces();
+            while (nis.hasMoreElements()) {
+                NetworkInterface ni = nis.nextElement();
+                if (!ni.isUp()) continue;
+                String n = ifName(ni);
+                if (n.contains("tun") || n.contains("tap") || n.contains("ppp") || n.contains("vpn")) {
+                    return true;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return false;
+    }
+
+    private static String ifName(NetworkInterface ni) {
+        String a = ni.getName() == null ? "" : ni.getName();
+        String b = ni.getDisplayName() == null ? "" : ni.getDisplayName();
+        return (a + " " + b).toLowerCase();
+    }
+
+    /** 所有非隧道网卡的 IPv4 定向广播地址，兜底再加 255.255.255.255 */
+    private static Set<String> broadcastAddrs() {
+        Set<String> out = new LinkedHashSet<>();
+        try {
+            Enumeration<NetworkInterface> nis = NetworkInterface.getNetworkInterfaces();
+            while (nis.hasMoreElements()) {
+                NetworkInterface ni = nis.nextElement();
+                if (!ni.isUp() || ni.isLoopback() || ni.isPointToPoint()) continue;
+                String n = ifName(ni);
+                if (n.contains("tun") || n.contains("tap") || n.contains("ppp") || n.contains("vpn")) continue;
+                for (InterfaceAddress ia : ni.getInterfaceAddresses()) {
+                    InetAddress a = ia.getAddress();
+                    if (!(a instanceof Inet4Address)) continue;
+                    int plen = ia.getNetworkPrefixLength();
+                    if (plen < 8 || plen > 32) continue;
+                    int ip = ByteBuffer.wrap(a.getAddress()).getInt();
+                    int mask = plen == 0 ? 0 : (0xffffffff << (32 - plen));
+                    int bc = ip | (~mask);
+                    out.add(InetAddress.getByAddress(ByteBuffer.allocate(4).putInt(bc).array()).getHostAddress());
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        out.add("255.255.255.255");
+        return out;
     }
 
     public static void scan(final Context ctx, final int timeoutMs, final Sink sink) {
@@ -42,16 +103,19 @@ public class Discover {
                 s = new DatagramSocket(null);
                 s.setReuseAddress(true);
                 s.setBroadcast(true);
-                s.setSoTimeout(700);
+                s.setSoTimeout(600);
                 s.bind(new InetSocketAddress(BEACON_PORT));
 
-                // 主动广播几次发现请求（电脑端监听到后会单播回包）
+                // 多轮、多广播地址发送发现请求（电脑端监听到后单播回包）
                 byte[] disc = REQUEST.getBytes("UTF-8");
-                InetAddress bcast = InetAddress.getByName("255.255.255.255");
-                DatagramPacket out = new DatagramPacket(disc, disc.length, bcast, BEACON_PORT);
-                for (int i = 0; i < 3; i++) {
-                    try { s.send(out); } catch (Exception ignored) { }
-                    Thread.sleep(120);
+                for (int round = 0; round < 4; round++) {
+                    for (String ip : broadcastAddrs()) {
+                        try {
+                            s.send(new DatagramPacket(disc, disc.length, InetAddress.getByName(ip), BEACON_PORT));
+                        } catch (Exception ignored) {
+                        }
+                    }
+                    Thread.sleep(150);
                 }
 
                 long end = System.currentTimeMillis() + timeoutMs;

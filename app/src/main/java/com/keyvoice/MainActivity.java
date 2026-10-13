@@ -250,9 +250,12 @@ public class MainActivity extends Activity {
     }
 
     private void scanPc() {
-        tvInfo.setText("正在搜索电脑（3 秒）…");
+        boolean vpn = Discover.vpnActive();
+        tvInfo.setText(vpn
+                ? "⚠ 检测到 VPN 已开启，可能拦截局域网发现。正在搜索（4 秒）…"
+                : "正在搜索电脑（4 秒）…");
         final List<String> found = new ArrayList<>();
-        Discover.scan(this, 3000, new Discover.Sink() {
+        Discover.scan(this, 4000, new Discover.Sink() {
             @Override public void onFound(final String ip, final int port) {
                 runOnUiThread(() -> found.add(ip + ":" + port));
             }
@@ -260,7 +263,8 @@ public class MainActivity extends Activity {
             @Override public void onDone(final int count) {
                 runOnUiThread(() -> {
                     if (count == 0) {
-                        tvInfo.setText("没搜到。确认：①电脑已运行接收端；②手机与电脑同一 WiFi；③电脑防火墙放行 17890/17891。");
+                        tvInfo.setText("没搜到。确认：①电脑已运行接收端；②同一 WiFi；③电脑防火墙放行 17890/17891"
+                                + (Discover.vpnActive() ? "；④临时关闭 VPN 再试（VPN 会拦截广播）" : "。"));
                         return;
                     }
                     String[] items = found.toArray(new String[0]);
@@ -288,7 +292,9 @@ public class MainActivity extends Activity {
         final String target = s;
         Sender.ping(this, (ok, msg) -> tvInfo.setText(ok
                 ? "已自动连接：" + target + "（收到文字将直接上屏到电脑光标处）"
-                : "已填 " + target + " 但连不通：" + msg + "，检查电脑防火墙/接收端"));
+                : "已填 " + target + " 但连不通：" + msg
+                + (Discover.vpnActive() ? " —— 手机开着 VPN 时 HTTP 也会走隧道，建议临时关闭 VPN 再试"
+                : " —— 检查电脑防火墙是否放行 17890（可用 pc/allow_firewall.bat 一键放行）")));
     }
 
     private void testSend() {
