@@ -7,6 +7,7 @@ import android.content.ComponentName;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
+import android.content.res.ColorStateList;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Bundle;
@@ -14,7 +15,6 @@ import android.os.PowerManager;
 import android.provider.Settings;
 import android.speech.RecognitionService;
 import android.text.TextUtils;
-import android.view.View;
 import android.view.ViewGroup;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
@@ -32,7 +32,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 设置页（v0.2.0）：承接原主界面的全部配置。
+ * 设置页（v0.3.0）：沿用 v0.2.0 的全部配置，改用统一深色设计系统（Ui）。
  * 物理按键触发与遮蔽模式已移除；「模拟长按」手势依赖无障碍服务，在这里开启。
  */
 public class SettingsActivity extends Activity {
@@ -56,134 +56,123 @@ public class SettingsActivity extends Activity {
         cfg = new Config(this);
 
         ScrollView sv = new ScrollView(this);
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        int p = dp(14);
-        root.setPadding(p, p, p, p);
+        LinearLayout root = Ui.rootScroll(this);
         sv.addView(root);
         setContentView(sv);
 
-        // ---- 传输方式
-        root.addView(title("传到 Windows 10 的方式"));
+        root.addView(Ui.appBar(this, "KeyVoice · 设置"));
 
+        // ---- 传输方式 ----
+        LinearLayout c1 = Ui.sectionCard(this);
+        c1.addView(Ui.sectionTitle(this, "传到 Windows 10 的方式"));
         rgTrans = new RadioGroup(this);
-        RadioButton rbAdb = new RadioButton(this);
-        rbAdb.setId(10);
-        rbAdb.setText("adb（USB 线，不需要局域网）");
-        RadioButton rbLan = new RadioButton(this);
-        rbLan.setId(11);
-        rbLan.setText("局域网 WiFi");
-        rgTrans.addView(rbAdb);
-        rgTrans.addView(rbLan);
+        RadioButton rbAdb = new RadioButton(this); rbAdb.setId(10); rbAdb.setText("adb（USB 线，不需要局域网）");
+        RadioButton rbLan = new RadioButton(this); rbLan.setId(11); rbLan.setText("局域网 WiFi");
+        styleRadio(rbAdb); styleRadio(rbLan);
+        rgTrans.addView(rbAdb); rgTrans.addView(rbLan);
         rgTrans.check(cfg.adbMode() ? 10 : 11);
-        root.addView(rgTrans);
-
-        tvAdbHint = label("");
-        tvAdbHint.setTextColor(Color.parseColor("#E65100"));
-        root.addView(tvAdbHint);
+        c1.addView(rgTrans);
+        tvAdbHint = Ui.body(this, "");
+        tvAdbHint.setTextColor(Ui.warning(this));
+        c1.addView(tvAdbHint);
         rgTrans.setOnCheckedChangeListener((g, id) -> applyTransport());
+        root.addView(c1);
 
-        // ---- 电脑地址
-        root.addView(title("电脑地址"));
-        etHost = new EditText(this);
-        etHost.setHint("电脑局域网 IP，如 192.168.1.5（仅局域网模式用）");
+        // ---- 电脑地址 ----
+        LinearLayout c2 = Ui.sectionCard(this);
+        c2.addView(Ui.sectionTitle(this, "电脑地址"));
+        etHost = Ui.inputField(this, "电脑局域网 IP，如 192.168.1.5（仅局域网模式用）");
         etHost.setText(cfg.host());
         etHost.setSingleLine(true);
-        root.addView(etHost);
-
-        etPort = new EditText(this);
-        etPort.setHint("端口");
+        c2.addView(etHost);
+        etPort = Ui.inputField(this, "端口");
         etPort.setText(String.valueOf(cfg.port()));
         etPort.setSingleLine(true);
-        root.addView(etPort);
+        LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        plp.topMargin = Ui.dp(this, 8);
+        etPort.setLayoutParams(plp);
+        c2.addView(etPort);
+        LinearLayout row1 = Ui.row(this);
+        Button bScan = Ui.ghostButton(this, "搜索电脑"); bScan.setOnClickListener(v -> scanPc());
+        Button bTest = Ui.ghostButton(this, "测试发送"); bTest.setOnClickListener(v -> testSend());
+        addWeighted(row1, bScan, bTest);
+        c2.addView(row1);
+        root.addView(c2);
 
-        LinearLayout row1 = row();
-        btnScan = button("搜索电脑", v -> scanPc());
-        row1.addView(btnScan);
-        row1.addView(button("测试发送", v -> testSend()));
-        root.addView(row1);
-
-        // ---- 语音来源
-        root.addView(title("语音来源"));
+        // ---- 语音来源 ----
+        LinearLayout c3 = Ui.sectionCard(this);
+        c3.addView(Ui.sectionTitle(this, "语音来源"));
         rgMode = new RadioGroup(this);
-        RadioButton rbIme = new RadioButton(this);
-        rbIme.setId(1);
+        RadioButton rbIme = new RadioButton(this); rbIme.setId(1);
         rbIme.setText("用手机装的输入法（讯飞）语音输入（主页面「模拟长按」用）");
-        RadioButton rbSr = new RadioButton(this);
-        rbSr.setId(2);
+        RadioButton rbSr = new RadioButton(this); rbSr.setId(2);
         rbSr.setText("直接调用识别服务（通知栏/媒体键触发，可灭屏）");
-        rgMode.addView(rbIme);
-        rgMode.addView(rbSr);
+        styleRadio(rbIme); styleRadio(rbSr);
+        rgMode.addView(rbIme); rgMode.addView(rbSr);
         rgMode.check("sr".equals(cfg.mode()) ? 2 : 1);
-        root.addView(rgMode);
-
+        c3.addView(rgMode);
         spEngine = new Spinner(this);
-        root.addView(spEngine);
-        root.addView(label("识别引擎默认自动选「讯飞（讯飞）」；若手机没暴露讯飞识别服务，则回退系统默认。"));
+        styleSpinner(spEngine);
+        c3.addView(spEngine);
+        c3.addView(Ui.caption(this, "识别引擎默认自动选「讯飞（讯飞）」；若手机没暴露讯飞识别服务，则回退系统默认。"));
         loadEngines();
+        root.addView(c3);
 
-        // ---- 电脑端动作
-        root.addView(title("电脑端收到后"));
+        // ---- 电脑端动作 ----
+        LinearLayout c4 = Ui.sectionCard(this);
+        c4.addView(Ui.sectionTitle(this, "电脑端收到后"));
         spAction = new Spinner(this);
+        styleSpinner(spAction);
         String[] acts = {"有输入光标就上屏，没光标就存剪贴板", "只显示在悬浮框/存入剪贴板，不上屏"};
         spAction.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, acts));
         spAction.setSelection("copy".equals(cfg.action()) ? 1 : 0);
-        root.addView(spAction);
+        c4.addView(spAction);
+        root.addView(c4);
 
-        // ---- 权限（模拟长按手势依赖无障碍）
-        root.addView(title("权限（「模拟长按」依赖无障碍服务）"));
-        root.addView(button("打开系统无障碍设置（手势注入必开）", v ->
-                startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))));
-        root.addView(button("一键开启所需权限（自动逐项跳转）", v -> wizardNext()));
+        // ---- 权限 ----
+        LinearLayout c5 = Ui.sectionCard(this);
+        c5.addView(Ui.sectionTitle(this, "权限（「模拟长按」依赖无障碍服务）"));
+        Button bA11y = Ui.ghostButton(this, "打开系统无障碍设置（手势注入必开）");
+        bA11y.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
+        c5.addView(bA11y);
+        Button bWiz = Ui.ghostButton(this, "一键开启所需权限（自动逐项跳转）");
+        bWiz.setOnClickListener(v -> wizardNext());
+        c5.addView(bWiz);
+        root.addView(c5);
 
-        // ---- 常驻
-        root.addView(title("常驻（灭屏听写需要）"));
-        cbResident = check("常驻前台服务（通知栏常驻）", cfg.resident());
-        root.addView(cbResident);
-        cbContinuous = check("连续听写（识别完自动再听，再按一次停止）", cfg.continuous());
-        root.addView(cbContinuous);
-        cbMedia = check("耳机/蓝牙媒体键也能触发（灭屏可用）", cfg.mediaKey());
-        root.addView(cbMedia);
-        cbVibrate = check("震动反馈", cfg.vibrate());
-        root.addView(cbVibrate);
-        cbAutoStart = check("开机自动启动", cfg.autoStart());
-        root.addView(cbAutoStart);
-        cbKeepScreen = check("听写时点亮屏幕（锁屏触发也能识别）", cfg.keepScreen());
-        root.addView(cbKeepScreen);
+        // ---- 常驻 ----
+        LinearLayout c6 = Ui.sectionCard(this);
+        c6.addView(Ui.sectionTitle(this, "常驻（灭屏听写需要）"));
+        cbResident = check("常驻前台服务（通知栏常驻）", cfg.resident()); c6.addView(cbResident);
+        cbContinuous = check("连续听写（识别完自动再听，再按一次停止）", cfg.continuous()); c6.addView(cbContinuous);
+        cbMedia = check("耳机/蓝牙媒体键也能触发（灭屏可用）", cfg.mediaKey()); c6.addView(cbMedia);
+        cbVibrate = check("震动反馈", cfg.vibrate()); c6.addView(cbVibrate);
+        cbAutoStart = check("开机自动启动", cfg.autoStart()); c6.addView(cbAutoStart);
+        cbKeepScreen = check("听写时点亮屏幕（锁屏触发也能识别）", cfg.keepScreen()); c6.addView(cbKeepScreen);
+        c6.addView(Ui.caption(this, "锁屏下请用这两种方式触发：① 下拉通知栏点「听写/停止」按钮；② 耳机/蓝牙媒体键。触发后会点亮屏幕完成听写，停了自动灭屏。"));
+        LinearLayout row3 = Ui.row(this);
+        Button bStart = Ui.ghostButton(this, "启动常驻服务"); bStart.setOnClickListener(v -> { save(); VoiceService.keep(this); refresh(); });
+        Button bStop = Ui.ghostButton(this, "停止服务"); bStop.setOnClickListener(v -> { startService(new Intent(this, VoiceService.class).setAction(VoiceService.ACTION_EXIT)); refresh(); });
+        addWeighted(row3, bStart, bStop);
+        c6.addView(row3);
+        root.addView(c6);
 
-        root.addView(label("锁屏下请用这两种方式触发：① 下拉通知栏点「听写/停止」按钮；② 耳机/蓝牙媒体键。触发后会点亮屏幕完成听写，停了自动灭屏。"));
+        // ---- 其它 ----
+        LinearLayout c7 = Ui.sectionCard(this);
+        c7.addView(Ui.sectionTitle(this, "其它"));
+        cbAutoSend = check("识别出字后自动发送到电脑（关掉则手动点「电脑上屏」）", cfg.autoSend()); c7.addView(cbAutoSend);
+        cbAutoClose = check("发送成功后自动关闭听写窗口", cfg.autoClose()); c7.addView(cbAutoClose);
+        cbNewline = check("文字末尾追加回车", cfg.addNewline()); c7.addView(cbNewline);
+        Button bMic = Ui.ghostButton(this, "授予麦克风权限（识别服务模式需要）");
+        bMic.setOnClickListener(v -> requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, 100));
+        c7.addView(bMic);
+        Button bSave = Ui.primaryButton(this, "保存设置");
+        bSave.setOnClickListener(v -> { save(); Toast.makeText(this, "已保存", Toast.LENGTH_SHORT).show(); });
+        c7.addView(bSave);
+        root.addView(c7);
 
-        LinearLayout row3 = row();
-        row3.addView(button("启动常驻服务", v -> {
-            save();
-            VoiceService.keep(this);
-            refresh();
-        }));
-        row3.addView(button("停止服务", v -> {
-            startService(new Intent(this, VoiceService.class).setAction(VoiceService.ACTION_EXIT));
-            refresh();
-        }));
-        root.addView(row3);
-
-        // ---- 其他
-        root.addView(title("其它"));
-        cbAutoSend = check("识别出字后自动发送到电脑（关掉则手动点「电脑上屏」）", cfg.autoSend());
-        root.addView(cbAutoSend);
-        cbAutoClose = check("发送成功后自动关闭听写窗口", cfg.autoClose());
-        root.addView(cbAutoClose);
-        cbNewline = check("文字末尾追加回车", cfg.addNewline());
-        root.addView(cbNewline);
-
-        root.addView(button("授予麦克风权限（识别服务模式需要）", v ->
-                requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, 100)));
-
-        root.addView(button("保存设置", v -> {
-            save();
-            Toast.makeText(this, "已保存", Toast.LENGTH_SHORT).show();
-        }));
-
-        tvInfo = label("");
-        tvInfo.setTextColor(Color.parseColor("#666666"));
+        tvInfo = Ui.caption(this, "");
         root.addView(tvInfo);
 
         applyTransport();
@@ -199,14 +188,12 @@ public class SettingsActivity extends Activity {
     // ------------------------------------------------------- 权限自动跳转
 
     private boolean micGranted() {
-        return checkSelfPermission(Manifest.permission.RECORD_AUDIO)
-                == PackageManager.PERMISSION_GRANTED;
+        return checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
     }
 
     private boolean accEnabled() {
         try {
-            String s = Settings.Secure.getString(getContentResolver(),
-                    Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
+            String s = Settings.Secure.getString(getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
             return s != null && s.toLowerCase().contains(getPackageName().toLowerCase());
         } catch (Exception e) {
             return false;
@@ -233,24 +220,57 @@ public class SettingsActivity extends Activity {
             tvInfo.setText("权限引导 2/3：请打开「按键语音 · 按键监听」开关后返回，会自动继续…");
             try {
                 startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
-            } catch (Exception ignored) {
-            }
+            } catch (Exception ignored) { }
             return;
         }
         if (!batteryIgnored()) {
             tvInfo.setText("权限引导 3/3：请允许忽略电池优化（保证后台常驻不被杀）…");
             try {
-                startActivity(new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                        Uri.parse("package:" + getPackageName())));
+                startActivity(new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + getPackageName())));
             } catch (Exception e) {
                 try {
                     startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
-                } catch (Exception ignored) {
-                }
+                } catch (Exception ignored) { }
             }
             return;
         }
         tvInfo.setText("✓ 权限全部就绪。回到主页面即可「模拟长按」听写。");
+    }
+
+    // ------------------------------------------------------- 控件样式
+
+    private void styleRadio(RadioButton rb) {
+        rb.setTextSize(13);
+        rb.setTextColor(Ui.text2(this));
+        try { rb.setButtonTintList(ColorStateList.valueOf(Ui.primary(this))); } catch (Exception ignored) { }
+    }
+
+    private void styleSpinner(Spinner sp) {
+        sp.setBackground(Ui.round(Ui.surfaceHi(this), Ui.border(this), 1, Ui.dp(this, 10)));
+        sp.setPadding(Ui.dp(this, 8), Ui.dp(this, 6), Ui.dp(this, 8), Ui.dp(this, 6));
+    }
+
+    private CheckBox check(String t, boolean v) {
+        CheckBox c = new CheckBox(this);
+        c.setText(t);
+        c.setChecked(v);
+        c.setTextSize(13);
+        c.setTextColor(Ui.text2(this));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = Ui.dp(this, 4);
+        c.setLayoutParams(lp);
+        try { c.setButtonTintList(ColorStateList.valueOf(Ui.primary(this))); } catch (Exception ignored) { }
+        return c;
+    }
+
+    private void addWeighted(LinearLayout row, Button... btns) {
+        for (Button b : btns) {
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+            lp.rightMargin = Ui.dp(this, 8);
+            b.setLayoutParams(lp);
+            row.addView(b);
+        }
     }
 
     // ------------------------------------------------------------- 逻辑
@@ -357,8 +377,7 @@ public class SettingsActivity extends Activity {
         cfg.host(etHost.getText().toString().trim());
         try {
             cfg.port(Integer.parseInt(etPort.getText().toString().trim()));
-        } catch (Exception ignored) {
-        }
+        } catch (Exception ignored) { }
         cfg.mode(rgMode.getCheckedRadioButtonId() == 2 ? "sr" : "ime");
         int ei = spEngine.getSelectedItemPosition();
         cfg.srComponent(ei >= 0 && ei < engineComps.size() ? engineComps.get(ei) : "");
@@ -378,50 +397,6 @@ public class SettingsActivity extends Activity {
         tvInfo.setText(VoiceService.running
                 ? "服务状态：运行中（灭屏可通知栏/媒体键听写）"
                 : "服务状态：未运行。灭屏听写请先点「启动常驻服务」");
-    }
-
-    // --------------------------------------------------------- UI 小工具
-
-    private int dp(int v) {
-        return (int) (v * getResources().getDisplayMetrics().density + 0.5f);
-    }
-
-    private TextView title(String t) {
-        TextView tv = label(t);
-        tv.setTextSize(15);
-        tv.setTextColor(Color.parseColor("#1976D2"));
-        tv.setPadding(0, dp(12), 0, dp(4));
-        return tv;
-    }
-
-    private TextView label(String t) {
-        TextView tv = new TextView(this);
-        tv.setText(t);
-        tv.setTextSize(13);
-        return tv;
-    }
-
-    private LinearLayout row() {
-        LinearLayout l = new LinearLayout(this);
-        l.setOrientation(LinearLayout.HORIZONTAL);
-        return l;
-    }
-
-    private Button button(String t, View.OnClickListener l) {
-        Button b = new Button(this);
-        b.setText(t);
-        b.setOnClickListener(l);
-        b.setLayoutParams(new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        return b;
-    }
-
-    private CheckBox check(String t, boolean v) {
-        CheckBox c = new CheckBox(this);
-        c.setText(t);
-        c.setChecked(v);
-        c.setTextSize(13);
-        return c;
     }
 
     @Override

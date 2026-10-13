@@ -1,13 +1,32 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="AppTheme" parent="@android:style/Theme.DeviceDefault.Light.NoActionBar" />
+    <!-- Forces a true dark theme so the Android UI matches the Windows receiver. -->
+    <style name="AppTheme" parent="@android:style/Theme.DeviceDefault.NoActionBar">
+        <item name="android:windowBackground">@color/kv_bg</item>
+        <item name="android:colorBackground">@color/kv_bg</item>
+        <item name="android:colorForeground">@color/kv_text</item>
+        <item name="android:textColorPrimary">@color/kv_text</item>
+        <item name="android:textColorSecondary">@color/kv_text2</item>
+        <item name="android:textColorTertiary">@color/kv_text3</item>
+        <item name="android:colorPrimary">@color/kv_primary</item>
+        <item name="android:colorPrimaryDark">@color/kv_bg</item>
+        <item name="android:colorAccent">@color/kv_primary</item>
+        <item name="android:colorControlActivated">@color/kv_primary</item>
+        <item name="android:colorControlHighlight">@color/kv_primary_dim</item>
+        <item name="android:colorButtonNormal">@color/kv_surface_hi</item>
+    </style>
 
-    <style name="TranslucentTheme" parent="@android:style/Theme.DeviceDefault.Light.NoActionBar">
+    <!-- Translucent top-anchored input window (VoiceInputActivity). -->
+    <style name="TranslucentTheme" parent="@android:style/Theme.DeviceDefault.NoActionBar">
         <item name="android:windowBackground">@android:color/transparent</item>
         <item name="android:colorBackgroundCacheHint">@null</item>
         <item name="android:windowIsTranslucent">true</item>
         <item name="android:windowNoTitle">true</item>
         <item name="android:backgroundDimEnabled">false</item>
         <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:textColorPrimary">@color/kv_text</item>
+        <item name="android:textColorSecondary">@color/kv_text2</item>
+        <item name="android:colorAccent">@color/kv_primary</item>
+        <item name="android:colorBackground">@color/kv_bg</item>
     </style>
 </resources>

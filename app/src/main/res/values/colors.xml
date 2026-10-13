@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- KeyVoice dark design tokens (shared with the Windows receiver) -->
+    <color name="kv_bg">#0E1116</color>          <!-- page background -->
+    <color name="kv_surface">#161A21</color>      <!-- cards / panels -->
+    <color name="kv_surface_hi">#1F2530</color>  <!-- raised / inputs -->
+    <color name="kv_border">#2A313C</color>      <!-- dividers, outlines -->
+    <color name="kv_text">#E6EAF0</color>        <!-- primary text -->
+    <color name="kv_text2">#9AA4B2</color>       <!-- secondary text -->
+    <color name="kv_text3">#6B7585</color>       <!-- muted / captions -->
+    <color name="kv_primary">#4F8CFF</color>     <!-- brand blue -->
+    <color name="kv_primary_press">#3B75E6</color>
+    <color name="kv_primary_dim">#16233B</color> <!-- primary at low alpha -->
+    <color name="kv_accent">#22D3EE</color>      <!-- cyan accent (mic / live) -->
+    <color name="kv_success">#34D399</color>
+    <color name="kv_warning">#FBBF24</color>
+    <color name="kv_error">#F87171</color>
+</resources>

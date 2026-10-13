@@ -11,6 +11,7 @@ import android.os.Looper;
 import android.text.Editable;
 import android.text.TextWatcher;
 import android.view.Gravity;
+import android.view.View;
 import android.view.ViewGroup;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
@@ -19,7 +20,7 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 
 /**
- * 主页面（v0.2.0 精简版）：只有三样东西——
+ * 主页面（v0.3.0）：沿用 v0.2.0 的三件套，但改用统一深色设计系统（Ui）。
  *   ① 输入框（讯飞语音出的字落在这里）
  *   ② 模拟长按（在讯飞空格键位置模拟“按住不松”开始说话，再点一次松开）
  *   ③ 电脑上屏（把输入框里的文字发到电脑光标处）
@@ -29,7 +30,8 @@ public class MainActivity extends Activity {
 
     private EditText et;
     private TextView tvStatus;
-    private Button btnHold, btnSend;
+    private View statusDot;
+    private Button btnHold, btnSend, btnSettings;
     private final Handler h = new Handler(Looper.getMainLooper());
     private Config cfg;
     private boolean sending = false;
@@ -68,44 +70,57 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         cfg = new Config(this);
 
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        int p = dp(16);
-        root.setPadding(p, p, p, p);
-        setContentView(root);
+        LinearLayout root = Ui.root(this);
 
-        tvStatus = new TextView(this);
-        tvStatus.setTextSize(14);
-        root.addView(tvStatus);
+        root.addView(Ui.appBar(this, "KeyVoice · 按键语音"));
 
-        // ① 输入框
-        et = new EditText(this);
-        et.setHint("语音识别出的文字会落在这里；也可直接手动输入");
+        // 连接状态卡片
+        LinearLayout statusCard = Ui.sectionCard(this);
+        LinearLayout sr = Ui.row(this);
+        sr.setGravity(Gravity.CENTER_VERTICAL);
+        statusDot = Ui.stateDot(this, Ui.text3(this));
+        LinearLayout.LayoutParams dlp = (LinearLayout.LayoutParams) statusDot.getLayoutParams();
+        dlp.rightMargin = Ui.dp(this, 8);
+        sr.addView(statusDot);
+        tvStatus = Ui.body(this, "连接状态：初始化中…");
+        sr.addView(tvStatus);
+        statusCard.addView(sr);
+        root.addView(statusCard);
+
+        // 主操作卡片
+        LinearLayout main = Ui.sectionCard(this);
+        main.addView(Ui.sectionTitle(this, "语音输入"));
+
+        et = Ui.inputField(this, "语音识别出的文字会落在这里；也可直接手动输入");
         et.setMinLines(4);
         et.setGravity(Gravity.TOP);
-        root.addView(et, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(140)));
+        LinearLayout.LayoutParams elp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        elp.bottomMargin = Ui.dp(this, 12);
+        et.setLayoutParams(elp);
+        main.addView(et);
 
-        // ② 模拟长按
-        btnHold = new Button(this);
-        btnHold.setTextSize(17);
-        btnHold.setText("🎤 模拟长按空格（开始说话）");
-        root.addView(btnHold);
+        LinearLayout.LayoutParams full = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        full.bottomMargin = Ui.dp(this, 10);
+
+        btnHold = Ui.primaryButton(this, "🎤  模拟长按空格（开始说话）");
         btnHold.setOnClickListener(v -> onHoldClick());
+        btnHold.setLayoutParams(full);
+        main.addView(btnHold);
 
-        // ③ 电脑上屏
-        btnSend = new Button(this);
-        btnSend.setTextSize(17);
-        btnSend.setText("电脑上屏");
-        root.addView(btnSend);
+        btnSend = Ui.accentButton(this, "电脑上屏");
         btnSend.setOnClickListener(v -> doSend(true));
+        btnSend.setLayoutParams(full);
+        main.addView(btnSend);
+
+        root.addView(main);
 
         // 设置入口
-        Button btnSettings = new Button(this);
-        btnSettings.setText("设置（电脑地址 / 语音引擎 / 常驻等）");
-        root.addView(btnSettings);
+        btnSettings = Ui.ghostButton(this, "设置（电脑地址 / 语音引擎 / 常驻 / 权限）");
         btnSettings.setOnClickListener(v ->
                 startActivity(new Intent(this, SettingsActivity.class)));
+        root.addView(btnSettings);
 
         et.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
@@ -135,7 +150,7 @@ public class MainActivity extends Activity {
     /** 模拟长按按钮：第一次点 = 按住空格开始说话；第二次点 = 松开并等字发送 */
     private void onHoldClick() {
         if (KeyTriggerService.holding) {
-            btnHold.setText("🎤 已松开，识别中…");
+            btnHold.setText("🎤  已松开，识别中…");
             KeyTriggerService.instance.endHold();
             return;
         }
@@ -165,7 +180,7 @@ public class MainActivity extends Activity {
 
         sending = true;
         tvStatus.setText("发送中…");
-        btnHold.setText("🎤 模拟长按空格（开始说话）");
+        btnHold.setText("🎤  模拟长按空格（开始说话）");
         String finalText = text;
         Sender.send(this, text, (ok, msg) -> {
             sending = false;
@@ -185,8 +200,10 @@ public class MainActivity extends Activity {
                 : (cfg.host().isEmpty() ? "局域网模式（未填电脑 IP，去设置里搜索）" : "局域网 → " + cfg.host() + ":" + cfg.port());
         boolean accOk = KeyTriggerService.instance != null;
         tvStatus.setText(where + "\n无障碍服务：" + (accOk ? "已开启（手势可用）" : "未开启（「模拟长按」需要它）"));
+        int color = accOk ? Ui.success(this) : Ui.warning(this);
+        statusDot.setBackground(Ui.round(color, 0, 0, (float) Ui.dp(this, 10) / 2f));
         if (!KeyTriggerService.holding) {
-            btnHold.setText("🎤 模拟长按空格（开始说话）");
+            btnHold.setText("🎤  模拟长按空格（开始说话）");
         }
     }
 
@@ -202,9 +219,5 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) {
         }
         super.onDestroy();
-    }
-
-    private int dp(int v) {
-        return (int) (v * getResources().getDisplayMetrics().density + 0.5f);
     }
 }

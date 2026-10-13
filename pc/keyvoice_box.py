@@ -1,13 +1,15 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-KeyVoice · Windows 10 接收端（状态小窗版）
+KeyVoice · Windows 10 接收端（状态小窗版，深色设计系统）
 
 - 没有可编辑输入框：只是一个常驻右上角、一直置顶的「状态 + 最近收到」小窗。
 - 手机语音文字送达后：写入剪贴板 → 还原你正在用的窗口焦点 → Ctrl+V 直接上屏到
   任意有光标的输入框（记事本、浏览器、微信…）；没有光标则只留存剪贴板并弹窗提示。
 - 局域网自动发现：监听 UDP 17891，手机点「搜索电脑」时回包，自动连上。
 - adb 模式：`adb reverse tcp:17890 tcp:17890` 后手机发到 127.0.0.1 即可。
+
+配色与 Android 端（res/values/colors.xml / Ui.java）共用同一套深色 token。
 
 用法：  python keyvoice_box.py [端口]      默认 17890
 依赖：仅 Python 标准库 + tkinter（无需 pip 安装任何东西）
@@ -24,6 +26,24 @@ import tkinter as tk
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 17890
+
+# ----------------------------------------------------------- 深色设计 token
+BG = "#0E1116"          # 窗口背景
+SURFACE = "#161A21"     # 顶栏 / 卡片
+SURFACE_HI = "#1F2530"  # 按钮 / 输入框
+BORDER = "#2A313C"      # 分割线
+TEXT = "#E6EAF0"        # 主文字
+TEXT2 = "#9AA4B2"       # 次文字
+TEXT3 = "#6B7585"       # 弱文字
+PRIMARY = "#4F8CFF"     # 品牌蓝
+PRIMARY_PRESS = "#3B75E6"
+ACCENT = "#22D3EE"      # 强调（活动指示）
+SUCCESS = "#34D399"
+WARNING = "#FBBF24"
+ERROR = "#F87171"
+
+FONT_TITLE = ("Microsoft YaHei", 12, "bold")
+FONT_SM = ("Microsoft YaHei", 10)
 
 u32 = ctypes.WinDLL("user32", use_last_error=True)
 k32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -135,7 +155,7 @@ def set_clipboard(text):
 
 def press_ctrl_v():
     def k(vk, up=False):
-        return INPUT(1, KEYBDINPUT(vk, 0, KEYEVENTF_KEYUP if up else 0, 0, 0))
+        return INPUT(1, KEYBDINPUT(vk, 0, KEYEVENTF_KEYUP if up else 0, 0, 0), b"\x00" * 8)
     seq = (INPUT * 4)(k(0x11), k(0x56), k(0x56, True), k(0x11, True))
     ptr = ctypes.cast(ctypes.byref(seq), ctypes.POINTER(INPUT))
     u32.SendInput(4, ptr, ctypes.sizeof(INPUT))
@@ -208,40 +228,58 @@ class Box:
         self.count = 0
         self.last = ""
         self.last_external = None
+        self.var_status = tk.StringVar(value="监听中（端口 %d）· 等待连接" % port)
+        self.var_auto = tk.BooleanVar(value=True)
 
         root.title("KeyVoice")
         root.attributes("-topmost", True)
         root.resizable(False, False)
-        root.geometry("360x96+%d+40" % (root.winfo_screenwidth() - 380))
-        root.configure(bg="#1F1F1F")
+        root.geometry("380x132+%d+40" % (root.winfo_screenwidth() - 400))
+        root.configure(bg=BG)
         try:
             root.wm_attributes("-toolwindow", True)   # 不在任务栏占大块
         except Exception:
             pass
 
-        self.var_status = tk.StringVar(value="监听中（端口 %d）· 等待连接" % port)
-        self.var_auto = tk.BooleanVar(value=True)
+        # 顶栏
+        hdr = tk.Frame(root, bg=SURFACE)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="KeyVoice", bg=SURFACE, fg=TEXT,
+                 font=FONT_TITLE).pack(side="left", padx=12, pady=9)
+        self.status_canvas = tk.Canvas(hdr, width=10, height=10, bg=SURFACE, highlightthickness=0)
+        self.status_canvas.pack(side="left")
+        self.dot = self.status_canvas.create_oval(0, 0, 10, 10, fill=WARNING)
+        tk.Label(hdr, textvariable=self.var_status, bg=SURFACE, fg=TEXT2,
+                 font=FONT_SM, anchor="w").pack(side="left", padx=8, pady=9)
 
-        tk.Label(root, textvariable=self.var_status, bg="#1F1F1F", fg="#90CAF9",
-                 font=("Microsoft YaHei", 11), anchor="w", padx=8).pack(fill="x", pady=(8, 2))
-
+        # 最近收到
+        body = tk.Frame(root, bg=BG)
+        body.pack(fill="both", expand=True, padx=12, pady=(6, 2))
         self.var_last = tk.StringVar(value="（收到语音文字会显示在这里并直接上屏）")
-        tk.Label(root, textvariable=self.var_last, bg="#1F1F1F", fg="#E0E0E0",
-                 font=("Microsoft YaHei", 10), anchor="w", padx=8, wraplength=340,
-                 justify="left").pack(fill="x")
+        tk.Label(body, textvariable=self.var_last, bg=BG, fg=TEXT,
+                 font=FONT_SM, anchor="w", wraplength=356, justify="left").pack(fill="x")
 
-        bar = tk.Frame(root, bg="#1F1F1F")
-        bar.pack(fill="x", padx=8, pady=(4, 6))
-        tk.Button(bar, text="复制最近", width=8, font=("Microsoft YaHei", 9),
-                  command=self.copy_last).pack(side="left")
-        tk.Checkbutton(bar, text="收到即上屏", variable=self.var_auto, bg="#1F1F1F",
-                       fg="#CCCCCC", font=("Microsoft YaHei", 8), selectcolor="#333333").pack(side="left", padx=4)
-        tk.Button(bar, text="关闭", width=6, font=("Microsoft YaHei", 9),
-                  command=self.close).pack(side="right")
+        # 控制条
+        bar = tk.Frame(root, bg=BG)
+        bar.pack(fill="x", padx=12, pady=(2, 10))
+        self._btn(bar, "复制最近", self.copy_last, "left")
+        tk.Checkbutton(bar, text="收到即上屏", variable=self.var_auto, bg=BG, fg=TEXT2,
+                       selectcolor=SURFACE_HI, activebackground=BG, activeforeground=TEXT,
+                       font=FONT_SM, borderwidth=0, highlightthickness=0).pack(side="left", padx=8)
+        self._btn(bar, "关闭", self.close, "right")
 
         root.protocol("WM_DELETE_WINDOW", self.close)
         self._start_focus_tracker()
         self.update_status()
+
+    @staticmethod
+    def _btn(parent, text, cmd, side):
+        b = tk.Button(parent, text=text, command=cmd, bg=SURFACE_HI, fg=TEXT,
+                      activebackground=PRIMARY_PRESS, activeforeground="#FFFFFF",
+                      font=FONT_SM, borderwidth=0, relief="flat", padx=12, pady=5,
+                      highlightthickness=0, highlightbackground=BORDER)
+        b.pack(side=side, padx=2)
+        return b
 
     # 跟踪"当前正在用的窗口"，上屏时把焦点还回去。
     # 注意：必须按进程 ID 排除自己的窗口 —— tkinter winfo_id() 与 GetForegroundWindow
@@ -274,7 +312,6 @@ class Box:
     def _append(self, text):
         self.count += 1
         self.last = text
-        # 状态：从"等待连接"切到"已连接"
         self.var_status.set("已连接 · 收到 %d 条 · 端口 %d" % (self.count, self.port))
         self.var_last.set("最近收到：%s" % text)
 
@@ -308,13 +345,13 @@ class Box:
             tip = tk.Toplevel(self.root)
             tip.wm_overrideredirect(True)
             tip.attributes("-topmost", True)
-            tip.configure(bg="#222222")
-            tk.Label(tip, text="收到语音文字：", bg="#222222", fg="#90CAF9",
-                     font=("Microsoft YaHei", 9)).pack(anchor="w", padx=10, pady=(6, 0))
-            tk.Label(tip, text=text, bg="#222222", fg="#FFFFFF",
-                     font=("Microsoft YaHei", 11), wraplength=360, justify="left").pack(
-                anchor="w", padx=10, pady=(2, 8))
-            x = self.root.winfo_screenwidth() - 380
+            tip.configure(bg=BG, highlightbackground=BORDER, highlightthickness=1)
+            tk.Label(tip, text="收到语音文字", bg=BG, fg=ACCENT,
+                     font=FONT_SM).pack(anchor="w", padx=12, pady=(8, 0))
+            tk.Label(tip, text=text, bg=BG, fg=TEXT,
+                     font=FONT_SM, wraplength=360, justify="left").pack(
+                anchor="w", padx=12, pady=(2, 10))
+            x = self.root.winfo_screenwidth() - 400
             tip.geometry("+%d+150" % x)
             tip.after(2500, tip.destroy)
         except Exception:
@@ -327,8 +364,10 @@ class Box:
     def update_status(self):
         if self.count == 0:
             self.var_status.set("监听中（端口 %d）· 等待连接" % self.port)
+            self.status_canvas.itemconfig(self.dot, fill=WARNING)
         else:
             self.var_status.set("已连接 · 收到 %d 条 · 端口 %d" % (self.count, self.port))
+            self.status_canvas.itemconfig(self.dot, fill=SUCCESS)
 
     def copy_last(self):
         if self.last:
@@ -344,7 +383,7 @@ class Box:
 
 def main():
     try:  # pythonw（无控制台后台运行）下 stdout 为 None，print 会抛错
-        print("KeyVoice 接收端  状态小窗 360x96 右上角置顶  端口 %d" % PORT)
+        print("KeyVoice 接收端  状态小窗 380x132 右上角置顶  端口 %d" % PORT)
         print("adb 模式：  adb reverse tcp:%d tcp:%d" % (PORT, PORT))
         print("局域网：手机点「搜索电脑」会自动连上本机")
     except Exception:
