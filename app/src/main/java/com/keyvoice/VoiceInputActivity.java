@@ -91,6 +91,7 @@ public class VoiceInputActivity extends Activity {
             @Override public void onTextChanged(CharSequence s, int a, int b, int c) { }
 
             @Override public void afterTextChanged(Editable s) {
+                if (KeyTriggerService.holding) return; // 正在“按住空格”录音，禁止自动发送打断
                 if (commitWait && s != null && !s.toString().trim().isEmpty()) {
                     // 模拟空格松开后，讯飞出字 -> 立即发送
                     commitWait = false;

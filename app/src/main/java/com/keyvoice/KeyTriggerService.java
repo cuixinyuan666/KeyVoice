@@ -17,32 +17,43 @@ import android.view.accessibility.AccessibilityWindowInfo;
  * 需要在系统「无障碍」里开启本服务。
  *
  * 讯飞输入法两步式流程（ime 模式，默认）：
- *   第1次按 -> 在空格键位置模拟“按住不松” → 讯飞开始语音，直接说话
- *              （输入窗口未开时同步打开；找到键盘后延时 1 秒再按住）
- *   第2次按 -> 模拟“松开空格” → 等讯飞出字后自动发送到电脑
- *   即：最后一次点击之前，虚拟手指一直按在空格上。
+ *   第1次按 -> 等 1 秒让输入法弹出，然后在空格键位置模拟“按住不松”，直接说话
+ *   第2次按 -> 模拟“松开空格” -> 等讯飞出字后自动发送到电脑
+ *
+ * 关键细节：
+ *   - 忽略按键自动重复（按住触发键不放时系统连发 ACTION_DOWN，会误触发“松开”）
+ *   - “按住”用持续续段手势：第一段 120ms 完成后立刻续上 60s 长段，
+ *     保证虚拟手指全程有效压在空格上，语音不会中途被打断
  */
 public class KeyTriggerService extends AccessibilityService {
 
     private long downAt = 0;
 
     private static final int S_IDLE = 0;      // 等第1次按
-    private static final int S_PENDING = 1;   // 已计划长按，在等 1 秒延时
+    private static final int S_PENDING = 1;   // 在等输入法弹出/延时
     private static final int S_HOLDING = 2;   // 正在“按住”空格（录音中）
 
-    /** 找到键盘位置后先等 1 秒（键盘动画/布局稳定）再按住 */
-    private static final long PRESS_DELAY_MS = 1000;
+    /** 第1次按下后先等 1 秒，让输入法弹出 */
+    private static final long WAIT_IME_MS = 1000;
+    /** 输入法没弹出时的重试间隔与次数 */
+    private static final long RETRY_MS = 500;
+    private static final int MAX_RETRY = 6;
     /** 最长按住 55 秒，防止虚拟指针卡死 */
     private static final long HOLD_TIMEOUT_MS = 55_000;
 
+    /** 供输入窗口查询：是否正在“按住空格”录音中（期间禁止自动发送打断） */
+    public static volatile boolean holding = false;
+
     private int holdState = S_IDLE;
     private Rect pendingRect = null;
+    private int imeRetries = 0;
 
     private GestureDescription.StrokeDescription holdStroke;
-    private boolean holdReady = false;   // 第一段“按下”手势是否已被系统接受
+    private boolean holdReady = false;
     private float holdX, holdY;
 
     private final Handler main = new Handler(Looper.getMainLooper());
+    private final Runnable waitTask = this::waitImeAndPress;
     private final Runnable pendingPressTask = this::pressPendingSpace;
     private final Runnable holdTimeoutTask = this::holdTimeout;
 
@@ -59,6 +70,11 @@ public class KeyTriggerService extends AccessibilityService {
                 Trigger.toast(this, "已绑定按键：" + KeyEvent.keyCodeToString(code));
             }
             return true;
+        }
+
+        // 忽略按键自动重复（长按触发键不松时系统会连发，曾导致“按住”被误松开）
+        if (event.getRepeatCount() > 0) {
+            return cfg.blockKey();
         }
 
         int trigger = cfg.triggerKey();
@@ -101,18 +117,21 @@ public class KeyTriggerService extends AccessibilityService {
                     return;
                 }
                 if (VoiceInputActivity.instance == null) Trigger.openInputUi(this);
-                // 计划 1 秒后“按住空格”
+                // 第1次按：先等 1 秒让输入法弹出
                 holdState = S_PENDING;
-                Rect r = findImeBounds();
-                if (r == null) r = fallbackKeyboardRect();
-                pendingRect = r;
-                main.postDelayed(pendingPressTask, PRESS_DELAY_MS);
+                imeRetries = 0;
+                Trigger.toast(this, "等待输入法弹出…");
+                main.postDelayed(waitTask, WAIT_IME_MS);
                 break;
 
             case S_PENDING:
-                // 延时期间又按了一次：不等了，立即按住
+                // 还在等输入法就又按了一次：立即用当前能拿到的位置按住
+                main.removeCallbacks(waitTask);
                 main.removeCallbacks(pendingPressTask);
-                pressPendingSpace();
+                Rect r = (pendingRect != null) ? pendingRect : findImeBounds();
+                if (r == null) r = fallbackKeyboardRect();
+                pendingRect = null;
+                pressSpaceHold(r);
                 break;
 
             case S_HOLDING:
@@ -120,6 +139,21 @@ public class KeyTriggerService extends AccessibilityService {
                 releaseAndSend();
                 break;
         }
+    }
+
+    /** 等待输入法弹出：每 500ms 查一次键盘窗口，最多 6 次，找到后稍作稳定即按住 */
+    private void waitImeAndPress() {
+        if (holdState != S_PENDING) return;
+        Rect r = findImeBounds();
+        if (r == null) {
+            if (++imeRetries <= MAX_RETRY) {
+                main.postDelayed(waitTask, RETRY_MS);
+                return;
+            }
+            r = fallbackKeyboardRect(); // 实在等不到就用屏幕底部中心兜底
+        }
+        pendingRect = r;
+        main.postDelayed(pendingPressTask, 300); // 稳定 300ms 再按
     }
 
     private void pressPendingSpace() {
@@ -160,23 +194,50 @@ public class KeyTriggerService extends AccessibilityService {
         }
     }
 
-    /** 在空格键位置开始“按住不松”（录音中），直到下一次按键才松开 */
+    /** 在空格键位置开始“按住不松”：第一段 120ms 完成后立刻续 60s 长段，全程压住 */
     private void pressSpaceHold(Rect ime) {
         holdX = ime.centerX();
-        holdY = ime.bottom - Math.max(40, ime.height() / 8); // 底排中心 = 空格
+        holdY = ime.bottom - Math.max(24, ime.height() / 14); // 底排中心偏下 = 空格
         Path p = new Path();
         p.moveTo(holdX, holdY);
-        holdStroke = new GestureDescription.StrokeDescription(p, 0, 120, true); // willContinue=按住不放
-        holdReady = false;
+
+        // 第一段：按下
+        GestureDescription.StrokeDescription seg1 =
+                new GestureDescription.StrokeDescription(p, 0, 120, true);
         boolean ok = dispatchGesture(
-                new GestureDescription.Builder().addStroke(holdStroke).build(),
+                new GestureDescription.Builder().addStroke(seg1).build(),
                 new GestureResultCallback() {
-                    @Override public void onCompleted(GestureDescription g) { holdReady = true; }
-                    @Override public void onCancelled(GestureDescription g) { holdReady = false; }
+                    @Override public void onCompleted(GestureDescription g) {
+                        // 立刻续上长段，保证手指一直“按着”（否则悬空状态可能被系统取消，语音被打断）
+                        try {
+                            Path p2 = new Path();
+                            p2.moveTo(holdX, holdY);
+                            GestureDescription.StrokeDescription seg2 =
+                                    seg1.continueStroke(p2, 0, HOLD_TIMEOUT_MS + 5000, true);
+                            boolean ok2 = dispatchGesture(
+                                    new GestureDescription.Builder().addStroke(seg2).build(),
+                                    new GestureResultCallback() {
+                                        @Override public void onCompleted(GestureDescription gg) {
+                                            holdReady = true;
+                                            holdStroke = seg2;
+                                        }
+                                        @Override public void onCancelled(GestureDescription gg) {
+                                            holdReady = false;
+                                        }
+                                    }, main);
+                            if (ok2) holdStroke = seg2;
+                        } catch (Exception ignored) {
+                        }
+                    }
+                    @Override public void onCancelled(GestureDescription g) {
+                        holdReady = false;
+                    }
                 }, main);
 
         if (ok) {
+            holdStroke = seg1;
             holdState = S_HOLDING;
+            holding = true;
             Trigger.toast(this, "已按住空格：请说话；说完再按一次 = 松开并发送到电脑");
             main.postDelayed(holdTimeoutTask, HOLD_TIMEOUT_MS);
         } else {
@@ -193,10 +254,11 @@ public class KeyTriggerService extends AccessibilityService {
     /** 松开空格 -> 等讯飞把文字写进输入框 -> 自动发送 */
     private void releaseAndSend() {
         main.removeCallbacks(holdTimeoutTask);
+        holding = false;
         if (holdState == S_HOLDING && holdStroke != null) {
             try {
                 if (!holdReady) {
-                    // 第一段还没被系统确认完，稍等再松开
+                    // 当前段还没被系统确认完，稍等再松开
                     main.postDelayed(this::releaseAndSend, 150);
                     return;
                 }
@@ -222,6 +284,7 @@ public class KeyTriggerService extends AccessibilityService {
 
     @Override
     public void onDestroy() {
+        holding = false;
         main.removeCallbacksAndMessages(null);
         super.onDestroy();
     }
