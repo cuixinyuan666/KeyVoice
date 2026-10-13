@@ -1,509 +1,210 @@
 package com.keyvoice;
 
-import android.Manifest;
 import android.app.Activity;
-import android.app.AlertDialog;
-import android.content.ComponentName;
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.Intent;
-import android.content.pm.PackageManager;
-import android.content.pm.ResolveInfo;
-import android.graphics.Color;
-import android.net.Uri;
+import android.content.IntentFilter;
 import android.os.Bundle;
-import android.os.PowerManager;
-import android.provider.Settings;
-import android.speech.RecognitionService;
-import android.text.TextUtils;
-import android.view.View;
+import android.os.Handler;
+import android.os.Looper;
+import android.text.Editable;
+import android.text.TextWatcher;
+import android.view.Gravity;
 import android.view.ViewGroup;
-import android.widget.ArrayAdapter;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
-import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
-import android.widget.RadioButton;
-import android.widget.RadioGroup;
-import android.widget.ScrollView;
-import android.widget.Spinner;
 import android.widget.TextView;
-import android.widget.Toast;
 
-import java.util.ArrayList;
-import java.util.List;
-
-/** 设置主界面（用代码搭 UI，省掉一堆 XML） */
+/**
+ * 主页面（v0.2.0 精简版）：只有三样东西——
+ *   ① 输入框（讯飞语音出的字落在这里）
+ *   ② 模拟长按（在讯飞空格键位置模拟“按住不松”开始说话，再点一次松开）
+ *   ③ 电脑上屏（把输入框里的文字发到电脑光标处）
+ * 其余设置全部在「设置」页。
+ */
 public class MainActivity extends Activity {
 
+    private EditText et;
+    private TextView tvStatus;
+    private Button btnHold, btnSend;
+    private final Handler h = new Handler(Looper.getMainLooper());
     private Config cfg;
-    private EditText etHost, etPort;
-    private TextView tvTrigger, tvInfo, tvAdbHint;
-    private Spinner spEngine, spAction;
-    private RadioGroup rgMode, rgTrans;
-    private Button btnScan;
-    private CheckBox cbAutoSend, cbAutoClose, cbNewline, cbLongPress;
-    private CheckBox cbResident, cbContinuous, cbMedia, cbVibrate, cbAutoStart;
-    private CheckBox cbBlockKey, cbKeepScreen;
+    private boolean sending = false;
+    /** 模拟空格“松开”后置位：等讯飞出字后立即发送（优先于普通自动发送） */
+    private boolean commitWait = false;
 
-    private final List<String> engineLabels = new ArrayList<>();
-    private final List<String> engineComps = new ArrayList<>();
+    private final Runnable autoSendTask = () -> doSend(false);
+
+    private final BroadcastReceiver commit = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context c, Intent i) {
+            String t = et.getText() == null ? "" : et.getText().toString();
+            if (t.trim().isEmpty()) {
+                commitWait = true;   // 松开了但讯飞还没出字，等文字一到就发
+                tvStatus.setText("已松开，等识别出字后自动发送…");
+            } else {
+                doSend(true);
+            }
+        }
+    };
+
+    private final BroadcastReceiver result = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context c, Intent i) {
+            // 识别服务模式（通知栏/媒体键触发）的结果直接落进输入框
+            String t = i.getStringExtra("text");
+            if (t != null && et != null) {
+                et.append(t);
+                tvStatus.setText("已收到识别结果，点「电脑上屏」发送");
+            }
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         cfg = new Config(this);
 
-        ScrollView sv = new ScrollView(this);
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        int p = dp(14);
+        int p = dp(16);
         root.setPadding(p, p, p, p);
-        sv.addView(root);
-        setContentView(sv);
+        setContentView(root);
 
-        // ---- 传输方式
-        root.addView(title("传到 Windows 10 的方式"));
+        tvStatus = new TextView(this);
+        tvStatus.setTextSize(14);
+        root.addView(tvStatus);
 
-        rgTrans = new RadioGroup(this);
-        RadioButton rbAdb = new RadioButton(this);
-        rbAdb.setId(10);
-        rbAdb.setText("adb（USB 线，不需要局域网）");
-        RadioButton rbLan = new RadioButton(this);
-        rbLan.setId(11);
-        rbLan.setText("局域网 WiFi");
-        rgTrans.addView(rbAdb);
-        rgTrans.addView(rbLan);
-        rgTrans.check(cfg.adbMode() ? 10 : 11);
-        root.addView(rgTrans);
+        // ① 输入框
+        et = new EditText(this);
+        et.setHint("语音识别出的文字会落在这里；也可直接手动输入");
+        et.setMinLines(4);
+        et.setGravity(Gravity.TOP);
+        root.addView(et, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(140)));
 
-        tvAdbHint = label("");
-        tvAdbHint.setTextColor(Color.parseColor("#E65100"));
-        root.addView(tvAdbHint);
-        rgTrans.setOnCheckedChangeListener((g, id) -> applyTransport());
+        // ② 模拟长按
+        btnHold = new Button(this);
+        btnHold.setTextSize(17);
+        btnHold.setText("🎤 模拟长按空格（开始说话）");
+        root.addView(btnHold);
+        btnHold.setOnClickListener(v -> onHoldClick());
 
-        // ---- 电脑地址
-        root.addView(title("电脑地址"));
-        etHost = new EditText(this);
-        etHost.setHint("电脑局域网 IP，如 192.168.1.5（仅局域网模式用）");
-        etHost.setText(cfg.host());
-        etHost.setSingleLine(true);
-        root.addView(etHost);
+        // ③ 电脑上屏
+        btnSend = new Button(this);
+        btnSend.setTextSize(17);
+        btnSend.setText("电脑上屏");
+        root.addView(btnSend);
+        btnSend.setOnClickListener(v -> doSend(true));
 
-        etPort = new EditText(this);
-        etPort.setHint("端口");
-        etPort.setText(String.valueOf(cfg.port()));
-        etPort.setSingleLine(true);
-        root.addView(etPort);
+        // 设置入口
+        Button btnSettings = new Button(this);
+        btnSettings.setText("设置（电脑地址 / 语音引擎 / 常驻等）");
+        root.addView(btnSettings);
+        btnSettings.setOnClickListener(v ->
+                startActivity(new Intent(this, SettingsActivity.class)));
 
-        LinearLayout row1 = row();
-        btnScan = button("搜索电脑", v -> scanPc());
-        row1.addView(btnScan);
-        row1.addView(button("测试发送", v -> testSend()));
-        root.addView(row1);
+        et.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
 
-        // ---- 语音来源
-        root.addView(title("语音来源"));
-        rgMode = new RadioGroup(this);
-        RadioButton rbIme = new RadioButton(this);
-        rbIme.setId(1);
-        rbIme.setText("用手机装的输入法（讯飞）语音输入");
-        RadioButton rbSr = new RadioButton(this);
-        rbSr.setId(2);
-        rbSr.setText("直接调用识别服务（可灭屏、无需界面）");
-        rgMode.addView(rbIme);
-        rgMode.addView(rbSr);
-        rgMode.check("sr".equals(cfg.mode()) ? 2 : 1);
-        root.addView(rgMode);
+            @Override public void onTextChanged(CharSequence s, int a, int b, int c) { }
 
-        spEngine = new Spinner(this);
-        root.addView(spEngine);
-        root.addView(label("识别引擎默认自动选「讯飞（讯飞）」；若手机没暴露讯飞识别服务，则回退系统默认（多数国产机底层也是讯飞）。均无需弹输入法框、可后台/灭屏运行。"));
-        loadEngines();
-
-        // ---- 电脑端动作
-        root.addView(title("电脑端收到后"));
-        spAction = new Spinner(this);
-        String[] acts = {"有输入光标就上屏，没光标就存剪贴板", "只显示在悬浮框/存入剪贴板，不上屏"};
-        spAction.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, acts));
-        spAction.setSelection("copy".equals(cfg.action()) ? 1 : 0);
-        root.addView(spAction);
-
-        // ---- 触发方式
-        root.addView(title("触发方式"));
-        tvTrigger = label(triggerText());
-        root.addView(tvTrigger);
-
-        LinearLayout row2 = row();
-        row2.addView(button("学习按键（追加绑定）", v -> learnKey()));
-        row2.addView(button("清除按键", v -> {
-            cfg.resetTriggerKeys();   // 恢复默认：仅音量减键
-            tvTrigger.setText(triggerText());
-        }));
-        root.addView(row2);
-        root.addView(label("学习按键为「追加」模式：可以依次把音量减、vivo 侧边 AI 键等多个键都绑上，全部同时生效；\n"
-                + "开启「屏蔽触发键原功能」后，被绑定的键在 App 运行期间不再执行原功能（音量不调、AI 侧边栏不弹）。"));
-
-        root.addView(button("打开系统无障碍设置（实体键触发必开）", v ->
-                startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))));
-
-        root.addView(button("一键开启所需权限（自动逐项跳转）", v -> wizardNext()));
-
-        cbLongPress = check("长按触发（≥0.5 秒，避免误触）", cfg.longPress());
-        root.addView(cbLongPress);
-        cbMedia = check("耳机/蓝牙媒体键也能触发（灭屏可用）", cfg.mediaKey());
-        root.addView(cbMedia);
-
-        // ---- 常驻
-        root.addView(title("常驻（灭屏听写需要）"));
-        cbResident = check("常驻前台服务（通知栏常驻）", cfg.resident());
-        root.addView(cbResident);
-        cbContinuous = check("连续听写（识别完自动再听，再按一次停止）", cfg.continuous());
-        root.addView(cbContinuous);
-        cbVibrate = check("震动反馈", cfg.vibrate());
-        root.addView(cbVibrate);
-        cbAutoStart = check("开机自动启动", cfg.autoStart());
-        root.addView(cbAutoStart);
-        cbBlockKey = check("屏蔽触发键原功能（音量键等不再调音量）", cfg.blockKey());
-        root.addView(cbBlockKey);
-        cbKeepScreen = check("听写时点亮屏幕（锁屏触发也能识别）", cfg.keepScreen());
-        root.addView(cbKeepScreen);
-
-        // ---- vivo 侧边 AI 键
-        root.addView(title("vivo 侧边 AI 键（与音量减同时有效）"));
-        root.addView(label("推荐组合用法（当前阶段两键并存）：\n"
-                + "① 先点上方「学习按键（追加绑定）」→ 按侧边 AI 键：绑定成功后，侧边键与音量减**同时**作为触发键，\n"
-                + "   且开启屏蔽后侧边键不再弹出 AI 侧边栏（前提：按键事件能派发给无障碍服务）。\n"
-                + "② 若学不到（系统拦截不派发）：「设置 → 快捷与辅助 → 快捷启动 / Jovi 按键」→ 动作设为「打开应用 → KeyVoice」，\n"
-                + "   这一步本身就是用本 App **替换**了 AI 侧边栏的原始功能；按侧边键开听写窗口，音量减做开始/发送。\n"
-                + "※ 若侧边键绑定后原功能仍会触发，说明该键被系统在派发前拦截，无 root 无法彻底屏蔽，请用方案②替换。"));
-
-        // ---- 遮蔽听写（防误碰）
-        root.addView(title("遮蔽听写（防误碰）"));
-        root.addView(button("启动听写遮蔽模式（双指下滑退出）", v -> {
-            if (KeyTriggerService.instance != null) {
-                KeyTriggerService.instance.startShieldMode();
-                Toast.makeText(this, "正在打开听写窗口并盖上遮罩…", Toast.LENGTH_SHORT).show();
-            } else {
-                Toast.makeText(this, "请先开启无障碍服务（触发方式里有入口）", Toast.LENGTH_LONG).show();
-            }
-        }));
-        root.addView(label("遮罩盖住键盘以上区域防误碰；物理键照常可用：按一次=按住空格说话，再按一次=松开发送到电脑。双指下滑退出遮罩。"));
-
-        root.addView(title("锁屏怎么用"));
-        root.addView(label("锁屏下物理键系统不派发，请用这两种方式触发：\n"
-                + "① 下拉通知栏点本服务的「听写/停止」按钮（锁屏可直接点）；\n"
-                + "② 按耳机/蓝牙媒体的播放键（已在「触发方式」里开启）。\n"
-                + "触发后会点亮屏幕完成听写，停了自动灭屏。"));
-
-        LinearLayout row3 = row();
-        row3.addView(button("启动常驻服务", v -> {
-            save();
-            VoiceService.keep(this);
-            refresh();
-        }));
-        row3.addView(button("停止服务", v -> {
-            startService(new Intent(this, VoiceService.class).setAction(VoiceService.ACTION_EXIT));
-            refresh();
-        }));
-        root.addView(row3);
-
-        // ---- 其他
-        root.addView(title("其它"));
-        cbAutoSend = check("输入法模式：停止输入 1.2 秒自动发送", cfg.autoSend());
-        root.addView(cbAutoSend);
-        cbAutoClose = check("发送成功后自动关闭窗口", cfg.autoClose());
-        root.addView(cbAutoClose);
-        cbNewline = check("文字末尾追加回车", cfg.addNewline());
-        root.addView(cbNewline);
-
-        root.addView(button("授予麦克风权限（识别服务模式需要）", v ->
-                requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, 100)));
-
-        root.addView(button("保存设置", v -> {
-            save();
-            Toast.makeText(this, "已保存", Toast.LENGTH_SHORT).show();
-        }));
-
-        tvInfo = label("");
-        tvInfo.setTextColor(Color.parseColor("#666666"));
-        root.addView(tvInfo);
-
-        applyTransport();
-        refresh();
-
-        // 默认局域网：没填过电脑 IP 就打开即自动扫描
-        if (!cfg.adbMode() && cfg.host().isEmpty()) {
-            tvInfo.setText("局域网模式：正在自动扫描电脑…");
-            etPort.postDelayed(this::scanPc, 600);
-        }
-    }
-
-    // ------------------------------------------------------- 权限自动跳转
-
-    private boolean micGranted() {
-        return checkSelfPermission(Manifest.permission.RECORD_AUDIO)
-                == PackageManager.PERMISSION_GRANTED;
-    }
-
-    private boolean accEnabled() {
-        try {
-            String s = Settings.Secure.getString(getContentResolver(),
-                    Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
-            return s != null && s.toLowerCase().contains(getPackageName().toLowerCase());
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
-    private boolean batteryIgnored() {
-        PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
-        return pm != null && pm.isIgnoringBatteryOptimizations(getPackageName());
-    }
-
-    private boolean needWizard() {
-        return !micGranted() || !accEnabled() || !batteryIgnored();
-    }
-
-    /** 逐项自动跳转：麦克风 → 无障碍 → 电池优化；每次回到本页自动进入下一项 */
-    private void wizardNext() {
-        if (!micGranted()) {
-            tvInfo.setText("权限引导 1/3：请求麦克风权限…");
-            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, 100);
-            return;
-        }
-        if (!accEnabled()) {
-            tvInfo.setText("权限引导 2/3：请打开「按键语音 · 按键监听」开关后返回，会自动继续…");
-            try {
-                startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
-            } catch (Exception ignored) {
-            }
-            return;
-        }
-        if (!batteryIgnored()) {
-            tvInfo.setText("权限引导 3/3：请允许忽略电池优化（保证后台常驻不被杀）…");
-            try {
-                startActivity(new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                        Uri.parse("package:" + getPackageName())));
-            } catch (Exception e) {
-                try {
-                    startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
-                } catch (Exception ignored) {
+            @Override public void afterTextChanged(Editable s) {
+                if (KeyTriggerService.holding) return; // 正在“按住空格”录音，禁止自动发送打断
+                if (commitWait && s != null && !s.toString().trim().isEmpty()) {
+                    // 模拟空格松开后，讯飞出字 -> 立即发送
+                    commitWait = false;
+                    h.removeCallbacks(autoSendTask);
+                    h.postDelayed(() -> doSend(false), 700);
+                    return;
                 }
-            }
-            return;
-        }
-        tvInfo.setText("✓ 权限全部就绪。触发键：" + keyName(cfg.triggerKey())
-                + "，点「启动常驻服务」即可开始使用。");
-    }
-
-    // ------------------------------------------------------------- 逻辑
-
-    private void applyTransport() {
-        boolean adb = rgTrans.getCheckedRadioButtonId() == 10;
-        etHost.setEnabled(!adb);
-        btnScan.setEnabled(!adb);
-        String port = etPort.getText().toString().trim();
-        if (port.isEmpty()) port = String.valueOf(cfg.port());
-        tvAdbHint.setText(adb
-                ? "电脑端先执行一次（手机插着 USB）：\n  adb reverse tcp:" + port + " tcp:" + port + "\n然后手机就能发到电脑，全程不走局域网。"
-                : "局域网模式：手机与电脑要在同一个 WiFi。");
-    }
-
-    private void loadEngines() {
-        engineLabels.clear();
-        engineComps.clear();
-        engineLabels.add("系统默认");
-        engineComps.add("");
-
-        PackageManager pm = getPackageManager();
-        List<ResolveInfo> list = pm.queryIntentServices(new Intent(RecognitionService.SERVICE_INTERFACE), 0);
-        int iflytekIndex = -1;
-        if (list != null) {
-            for (ResolveInfo ri : list) {
-                if (ri.serviceInfo == null) continue;
-                ComponentName cn = new ComponentName(ri.serviceInfo.packageName, ri.serviceInfo.name);
-                CharSequence l = ri.loadLabel(pm);
-                String label = l != null ? l.toString() : cn.getClassName();
-                if (cn.getPackageName().toLowerCase().contains("iflytek")) {
-                    label = label + "（讯飞）";
-                    if (iflytekIndex < 0) iflytekIndex = engineLabels.size();
-                }
-                engineLabels.add(label);
-                engineComps.add(cn.flattenToString());
-            }
-        }
-        spEngine.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, engineLabels));
-
-        int sel = 0;
-        String saved = cfg.srComponent();
-        if (!TextUtils.isEmpty(saved)) sel = Math.max(0, engineComps.indexOf(saved));
-        else if (iflytekIndex > 0) sel = iflytekIndex;
-        spEngine.setSelection(Math.min(sel, engineLabels.size() - 1));
-    }
-
-    private void scanPc() {
-        boolean vpn = Discover.vpnActive();
-        tvInfo.setText(vpn
-                ? "⚠ 检测到 VPN 已开启，可能拦截局域网发现。正在搜索（4 秒）…"
-                : "正在搜索电脑（4 秒）…");
-        final List<String> found = new ArrayList<>();
-        Discover.scan(this, 4000, new Discover.Sink() {
-            @Override public void onFound(final String ip, final int port) {
-                runOnUiThread(() -> found.add(ip + ":" + port));
-            }
-
-            @Override public void onDone(final int count) {
-                runOnUiThread(() -> {
-                    if (count == 0) {
-                        tvInfo.setText("没搜到。确认：①电脑已运行接收端；②同一 WiFi；③电脑防火墙放行 17890/17891"
-                                + (Discover.vpnActive() ? "；④临时关闭 VPN 再试（VPN 会拦截广播）" : "。"));
-                        return;
-                    }
-                    String[] items = found.toArray(new String[0]);
-                    if (items.length == 1) {
-                        connectTo(items[0]);
-                    } else {
-                        new AlertDialog.Builder(MainActivity.this)
-                                .setTitle("选择电脑")
-                                .setItems(items, (d, which) -> connectTo(items[which]))
-                                .show();
-                    }
-                });
+                if (!cfg.autoSend()) return;
+                if (s == null || s.toString().trim().isEmpty()) return;
+                h.removeCallbacks(autoSendTask);
+                h.postDelayed(autoSendTask, cfg.idleMs());
             }
         });
+
+        registerReceiver(commit, new IntentFilter("com.keyvoice.COMMIT"));
+        registerReceiver(result, new IntentFilter(VoiceService.ACTION_RESULT));
     }
 
-    private void connectTo(String s) {
-        String[] sp = s.split(":");
-        etHost.setText(sp[0]);
-        if (sp.length > 1) etPort.setText(sp[1]);
-        rgTrans.check(11);          // 切到局域网模式
-        applyTransport();
-        save();
-        tvInfo.setText("已锁定 " + s + "，正在测试连接…");
-        final String target = s;
-        Sender.ping(this, (ok, msg) -> tvInfo.setText(ok
-                ? "已自动连接：" + target + "（收到文字将直接上屏到电脑光标处）"
-                : "已填 " + target + " 但连不通：" + msg
-                + (Discover.vpnActive() ? " —— 手机开着 VPN 时 HTTP 也会走隧道，建议临时关闭 VPN 再试"
-                : " —— 检查电脑防火墙是否放行 17890（可用 pc/allow_firewall.bat 一键放行）")));
-    }
-
-    private void testSend() {
-        save();
-        Sender.send(this, "KeyVoice 测试 " + System.currentTimeMillis() % 10000, (ok, msg) ->
-                tvInfo.setText(ok ? "发送成功，看电脑悬浮框" : "发送失败：" + msg));
-    }
-
-    private void learnKey() {
-        cfg.learning(true);
-        tvTrigger.setText("请按下要绑定的实体键…（追加模式：新键会加进触发键列表）");
-        Toast.makeText(this, "按下你要追加的实体按键（可多次进入本模式绑多个键）", Toast.LENGTH_LONG).show();
-        new android.os.Handler(getMainLooper()).postDelayed(() -> {
-            if (cfg.learning()) {
-                cfg.learning(false);
-                tvTrigger.setText(triggerText());
-            }
-        }, 8000);
-    }
-
-    private void save() {
-        cfg.adbMode(rgTrans.getCheckedRadioButtonId() == 10);
-        cfg.host(etHost.getText().toString().trim());
-        try {
-            cfg.port(Integer.parseInt(etPort.getText().toString().trim()));
-        } catch (Exception ignored) {
+    /** 模拟长按按钮：第一次点 = 按住空格开始说话；第二次点 = 松开并等字发送 */
+    private void onHoldClick() {
+        if (KeyTriggerService.holding) {
+            btnHold.setText("🎤 已松开，识别中…");
+            KeyTriggerService.instance.endHold();
+            return;
         }
-        cfg.mode(rgMode.getCheckedRadioButtonId() == 2 ? "sr" : "ime");
-        int ei = spEngine.getSelectedItemPosition();
-        cfg.srComponent(ei >= 0 && ei < engineComps.size() ? engineComps.get(ei) : "");
-        cfg.action(spAction.getSelectedItemPosition() == 1 ? "copy" : "paste");
-        cfg.longPress(cbLongPress.isChecked());
-        cfg.mediaKey(cbMedia.isChecked());
-        cfg.resident(cbResident.isChecked());
-        cfg.continuous(cbContinuous.isChecked());
-        cfg.vibrate(cbVibrate.isChecked());
-        cfg.autoStart(cbAutoStart.isChecked());
-        cfg.blockKey(cbBlockKey.isChecked());
-        cfg.keepScreen(cbKeepScreen.isChecked());
-        cfg.autoSend(cbAutoSend.isChecked());
-        cfg.autoClose(cbAutoClose.isChecked());
-        cfg.addNewline(cbNewline.isChecked());
-    }
-
-    private void refresh() {
-        tvTrigger.setText(triggerText());
-        tvInfo.setText(VoiceService.running
-                ? "服务状态：运行中（灭屏可直接按键听写）"
-                : "服务状态：未运行。灭屏听写请先点「启动常驻服务」");
-    }
-
-    private String triggerText() {
-        StringBuilder sb = new StringBuilder("当前触发键（多键同时有效）：");
-        java.util.List<Integer> ks = cfg.triggerKeys();
-        for (int i = 0; i < ks.size(); i++) {
-            if (i > 0) sb.append("  +  ");
-            sb.append(keyName(ks.get(i)));
+        if (KeyTriggerService.instance == null) {
+            tvStatus.setText("需要无障碍服务（注入手势用）。请到「设置」里开启。");
+            return;
         }
-        return sb.toString();
-    }
-
-    private static String keyName(int code) {
-        if (code == 0) return "未设置";
-        try {
-            return android.view.KeyEvent.keyCodeToString(code);
-        } catch (Exception e) {
-            return String.valueOf(code);
+        // 聚焦输入框并确保输入法弹出，然后由服务等 1 秒后按住空格
+        et.requestFocus();
+        h.postDelayed(() -> {
+            InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+            if (imm != null) imm.showSoftInput(et, InputMethodManager.SHOW_IMPLICIT);
+        }, 100);
+        if (KeyTriggerService.instance.beginHoldFromUi()) {
+            btnHold.setText("松开（说话中…再点一次）");
         }
     }
 
-    // --------------------------------------------------------- UI 小工具
+    private void doSend(boolean force) {
+        if (sending && !force) return;
+        String text = et.getText() == null ? "" : et.getText().toString();
+        if (text.trim().isEmpty()) {
+            tvStatus.setText("没有内容可发送");
+            return;
+        }
+        if (cfg.addNewline()) text += "\n";
 
-    private int dp(int v) {
-        return (int) (v * getResources().getDisplayMetrics().density + 0.5f);
-    }
-
-    private TextView title(String t) {
-        TextView tv = label(t);
-        tv.setTextSize(15);
-        tv.setTextColor(Color.parseColor("#1976D2"));
-        tv.setPadding(0, dp(12), 0, dp(4));
-        return tv;
-    }
-
-    private TextView label(String t) {
-        TextView tv = new TextView(this);
-        tv.setText(t);
-        tv.setTextSize(13);
-        return tv;
-    }
-
-    private LinearLayout row() {
-        LinearLayout l = new LinearLayout(this);
-        l.setOrientation(LinearLayout.HORIZONTAL);
-        return l;
-    }
-
-    private Button button(String t, View.OnClickListener l) {
-        Button b = new Button(this);
-        b.setText(t);
-        b.setOnClickListener(l);
-        b.setLayoutParams(new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        return b;
-    }
-
-    private CheckBox check(String t, boolean v) {
-        CheckBox c = new CheckBox(this);
-        c.setText(t);
-        c.setChecked(v);
-        c.setTextSize(13);
-        return c;
+        sending = true;
+        tvStatus.setText("发送中…");
+        btnHold.setText("🎤 模拟长按空格（开始说话）");
+        String finalText = text;
+        Sender.send(this, text, (ok, msg) -> {
+            sending = false;
+            tvStatus.setText(ok ? "已发送：" + finalText : "失败：" + msg + "（检查设置里的电脑地址）");
+        });
     }
 
     @Override
     protected void onResume() {
         super.onResume();
-        refresh();
-        if (needWizard()) wizardNext();  // 从设置页返回后自动进入下一项
+        refreshStatus();
+    }
+
+    private void refreshStatus() {
+        String where = cfg.adbMode()
+                ? "adb 模式（需 adb reverse 隧道）"
+                : (cfg.host().isEmpty() ? "局域网模式（未填电脑 IP，去设置里搜索）" : "局域网 → " + cfg.host() + ":" + cfg.port());
+        boolean accOk = KeyTriggerService.instance != null;
+        tvStatus.setText(where + "\n无障碍服务：" + (accOk ? "已开启（手势可用）" : "未开启（「模拟长按」需要它）"));
+        if (!KeyTriggerService.holding) {
+            btnHold.setText("🎤 模拟长按空格（开始说话）");
+        }
+    }
+
+    @Override
+    protected void onDestroy() {
+        h.removeCallbacks(autoSendTask);
+        try {
+            unregisterReceiver(commit);
+        } catch (Exception ignored) {
+        }
+        try {
+            unregisterReceiver(result);
+        } catch (Exception ignored) {
+        }
+        super.onDestroy();
+    }
+
+    private int dp(int v) {
+        return (int) (v * getResources().getDisplayMetrics().density + 0.5f);
     }
 }
