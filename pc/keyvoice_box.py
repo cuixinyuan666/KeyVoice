@@ -3,13 +3,12 @@
 """
 KeyVoice · Windows 10 悬浮接收框
 
-一个一直置顶的小窗口，手机语音转文字通过 adb（USB）送过来后显示在这里：
-    [复制]   复制框里全部文字
-    [全部清除] 清空
-    [关闭]    退出程序
+固定 400x120 的小窗口，常驻右上角、一直置顶。
+手机语音转文字经 adb（USB）送过来后显示在这里，按钮：
+    [复制] [全部清除] [关闭]      [x]自动上屏
 
 用法：  python keyvoice_box.py [端口]      默认 17890
-adb：  adb reverse tcp:17890 tcp:17890     （手机插 USB 时执行一次）
+adb：  adb reverse tcp:17890 tcp:17890
 """
 
 import ctypes
@@ -110,7 +109,8 @@ def press_ctrl_v():
         return INPUT(1, KEYBDINPUT(vk, 0, KEYEVENTF_KEYUP if up else 0, 0, 0))
 
     seq = (INPUT * 4)(k(0x11), k(0x56), k(0x56, True), k(0x11, True))
-    u32.SendInput(4, ctypes.byref(seq), ctypes.sizeof(INPUT))
+    ptr = ctypes.cast(ctypes.byref(seq), ctypes.POINTER(INPUT))
+    u32.SendInput(4, ptr, ctypes.sizeof(INPUT))
 
 
 # -------------------------------------------------------------------- HTTP
@@ -157,46 +157,42 @@ class Box:
         self.port = port
         self.count = 0
 
-        root.title("KeyVoice · 接收框")
-        root.attributes("-topmost", True)                 # 一直置顶
-        root.geometry("420x300+%d+60" % (root.winfo_screenwidth() - 440))
-        root.minsize(320, 220)
+        root.title("KeyVoice")
+        root.attributes("-topmost", True)                  # 一直置顶
+        root.resizable(False, False)                       # 固定大小
+        # 固定 400x120，右上角
+        root.geometry("400x120+%d+40" % (root.winfo_screenwidth() - 420))
         root.configure(bg="#FAFAFA")
 
-        # 顶部状态
-        self.var_status = tk.StringVar(value="监听中…")
-        tk.Label(root, textvariable=self.var_status, bg="#FAFAFA", fg="#555",
-                 anchor="w", font=("Microsoft YaHei", 9)).pack(fill="x", padx=8, pady=(8, 2))
+        # 文本区（占满上半部分）
+        self.txt = tk.Text(root, wrap="word", font=("Microsoft YaHei", 11),
+                           bg="#FFFFFF", fg="#111111", relief="solid", bd=1,
+                           padx=6, pady=4)
+        self.txt.pack(fill="both", expand=True, padx=6, pady=(6, 2))
 
-        # 文本区
-        frame = tk.Frame(root)
-        frame.pack(fill="both", expand=True, padx=8, pady=4)
-        self.txt = tk.Text(frame, wrap="word", font=("Microsoft YaHei", 12),
-                           bg="#FFFFFF", fg="#111111", relief="solid", bd=1)
-        sb = tk.Scrollbar(frame, command=self.txt.yview)
-        self.txt.configure(yscrollcommand=sb.set)
-        sb.pack(side="right", fill="y")
-        self.txt.pack(side="left", fill="both", expand=True)
-
-        # 选项
-        self.var_auto = tk.BooleanVar(value=True)
-        tk.Checkbutton(root, text="收到即上屏（有输入光标才上屏，没光标只存剪贴板）",
-                       variable=self.var_auto, bg="#FAFAFA",
-                       font=("Microsoft YaHei", 9)).pack(anchor="w", padx=8)
-
-        # 按钮
+        # 底部一行：按钮 + 自动上屏开关 + 状态
         bar = tk.Frame(root, bg="#FAFAFA")
-        bar.pack(fill="x", padx=8, pady=8)
-        tk.Button(bar, text="复制", width=8, command=self.copy_all).pack(side="left")
-        tk.Button(bar, text="全部清除", width=8, command=self.clear_all).pack(side="left", padx=6)
-        tk.Button(bar, text="关闭", width=8, command=self.close).pack(side="right")
+        bar.pack(fill="x", padx=6, pady=(0, 4))
+
+        self.var_status = tk.StringVar(value="端口 %d" % port)
+        self.var_auto = tk.BooleanVar(value=True)
+
+        tk.Button(bar, text="复制", width=5, font=("Microsoft YaHei", 9),
+                  command=self.copy_all).pack(side="left")
+        tk.Button(bar, text="全部清除", width=7, font=("Microsoft YaHei", 9),
+                  command=self.clear_all).pack(side="left", padx=4)
+        tk.Button(bar, text="关闭", width=5, font=("Microsoft YaHei", 9),
+                  command=self.close).pack(side="left")
+        tk.Checkbutton(bar, text="自动上屏", variable=self.var_auto, bg="#FAFAFA",
+                       font=("Microsoft YaHei", 8)).pack(side="left", padx=4)
+        tk.Label(bar, textvariable=self.var_status, bg="#FAFAFA", fg="#777777",
+                 font=("Microsoft YaHei", 8)).pack(side="right")
 
         root.protocol("WM_DELETE_WINDOW", self.close)
         self.update_status()
 
     def update_status(self):
-        self.var_status.set("端口 %d · 已收 %d 条 · adb: adb reverse tcp:%d tcp:%d"
-                            % (self.port, self.count, self.port, self.port))
+        self.var_status.set("%d · 收 %d" % (self.port, self.count))
 
     # 由 HTTP 线程调用，转回 UI 线程
     def receive(self, text):
@@ -208,22 +204,30 @@ class Box:
             self.txt.insert("end", "\n")
         self.txt.insert("end", text)
         self.txt.see("end")
-        self.update_status()
 
         set_clipboard(text)
-        if self.var_auto.get():
+        if self.var_auto.get() and has_caret():
             time.sleep(0.05)
-            press_ctrl_v()     # 有光标就上屏，没光标这一步不会造成破坏
+            press_ctrl_v()
+            self.flash("已上屏")
+        else:
+            self.flash("无光标·已存")
+
+    def flash(self, tip):
+        self.var_status.set("%d · 收 %d · %s" % (self.port, self.count, tip))
+        self.root.after(2500, self.update_status)
 
     def copy_all(self):
         data = self.txt.get("1.0", "end-1c")
         if data:
             set_clipboard(data)
+            self.flash("已复制")
 
     def clear_all(self):
         self.txt.delete("1.0", "end")
         self.count = 0
         self.update_status()
+        self.flash("已清除")
 
     def close(self):
         try:
@@ -241,7 +245,7 @@ def main():
         s.close()
     except OSError:
         pass
-    print("KeyVoice 悬浮接收框  端口 %d" % PORT)
+    print("KeyVoice 悬浮接收框  400x120 右上角置顶  端口 %d" % PORT)
     print("adb 模式：  adb reverse tcp:%d tcp:%d" % (PORT, PORT))
     print("局域网模式：手机填  %s" % ip)
 
