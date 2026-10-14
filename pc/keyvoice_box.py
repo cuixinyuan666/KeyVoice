@@ -24,13 +24,19 @@ import ctypes
 import json
 import os
 import socket
+import subprocess
 import sys
 import threading
 import time
 import tkinter as tk
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 17890
+# 手机端消息接收端口（LanServer.java 同款协议：POST /text {"text":"..."}）
+PHONE_SRV_PORT = 17892
+# 最近一次 UDP 发现的手机 IP（供「发到手机」直连用）
+PHONE_ADDR = {"ip": None}
 
 # ----------------------------------------------------------- 深色设计 token
 BG = "#0E1116"          # 窗口背景
@@ -246,6 +252,7 @@ def udp_listen(port):
             try:
                 data, addr = s.recvfrom(256)
                 if b"KEYVOICE_DISCOVER" in data:
+                    PHONE_ADDR["ip"] = addr[0]   # 记住手机 IP，供「发到手机」直连
                     s.sendto(("KEYVOICE_HELLO:%d" % port).encode("utf-8"), addr)
             except socket.timeout:
                 continue
@@ -303,7 +310,13 @@ class Box:
         self.btn_top = self._hdr_btn(hdr, "置顶:开", self._toggle_top)
         self.btn_dock = self._hdr_btn(hdr, "收起", self._toggle_dock)
         self.close_btn = self._hdr_btn(hdr, "×", self.close, danger=True)
+        self.clock = tk.Label(hdr, text="", bg=SURFACE, fg=TEXT2, font=FONT_SM)
+        self.clock.bind("<Button-1>", self._hdr_click)   # 贴顶时点击横栏展开
         self._pack_header()
+        # 贴顶时点击横栏（标题处）展开
+        hdr.bind("<Button-1>", self._hdr_click)
+        self.title_label.bind("<Button-1>", self._hdr_click)
+        self._tick_clock()
 
         # 消息列表（可滚动）
         self.list_frame = tk.Frame(root, bg=BG)
@@ -331,6 +344,7 @@ class Box:
         bar = tk.Frame(self.input_frame, bg=SURFACE)
         bar.pack(fill="x", padx=10, pady=(0, 8))
         self._btn(bar, "上屏", self._paste_input, "left")
+        self._btn(bar, "发到手机", self.send_to_phone, "left")
         self._btn(bar, "清空输入框", self._clear_input, "left")
         self._btn(bar, "清空列表", self._clear_list, "left")
         tk.Checkbutton(bar, text="收到即上屏", variable=self.var_auto, bg=SURFACE, fg=TEXT2,
@@ -561,6 +575,42 @@ class Box:
     def _clear_input(self):
         self.input_box.delete("1.0", "end")
 
+    # ----------------------------------------------------------- 发到手机
+    def send_to_phone(self):
+        """把输入框内容发到手机端（LanServer 端口 17892）。
+        先试局域网直连（UDP 发现记录的手机 IP），失败则走 adb forward。"""
+        text = self.input_box.get("1.0", "end-1c")
+        if not text.strip():
+            self.toast("输入框为空")
+            return
+
+        def work():
+            ok, msg = self._post_to_phone(text)
+            self.root.after(0, lambda: self.toast("已发送到手机" if ok else "发送失败：" + msg))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _post_to_phone(self, text):
+        body = json.dumps({"text": text}).encode("utf-8")
+        tries = []
+        if PHONE_ADDR["ip"]:
+            tries.append(("http://%s:%d/text" % (PHONE_ADDR["ip"], PHONE_SRV_PORT), False))
+        tries.append(("http://127.0.0.1:%d/text" % PHONE_SRV_PORT, True))   # adb forward 兜底
+        last = "无可用通道"
+        for url, need_adb in tries:
+            try:
+                if need_adb:
+                    subprocess.run(["adb", "forward", "tcp:%d" % PHONE_SRV_PORT,
+                                    "tcp:%d" % PHONE_SRV_PORT], capture_output=True, timeout=6)
+                req = urllib.request.Request(
+                    url, data=body,
+                    headers={"Content-Type": "application/json; charset=utf-8"})
+                urllib.request.urlopen(req, timeout=2.5)
+                return True, url
+            except Exception as e:
+                last = str(e)
+        return False, last
+
     def _clear_list(self):
         for m in self.messages:
             if "row" in m and m["row"].winfo_exists():
@@ -583,48 +633,57 @@ class Box:
             self.dock()
 
     def dock(self):
-        """收起贴到屏幕顶部：只留一条细窄的顶栏（保持当前水平位置，不跳到居中）。"""
+        """收起贴顶：只保留 KeyVoice 标题栏，右侧显示当前时间。
+        横栏与展开态大小/位置完全统一（同 x、同宽、同高）；点击横栏即可展开。"""
         if self.docked:
             return
         self.normal_geom = self.root.geometry()
         x = self.root.winfo_x()
-        sw = self.root.winfo_screenwidth()
-        # 只隐藏“中间偏宽”的部件（状态/置顶），标题与收起/关闭保留，bar 更窄也不塌陷
-        self.status_canvas.pack_forget()
-        self.status_label.pack_forget()
-        self.status_spacer.pack_forget()
-        self.btn_top.pack_forget()
+        w = self.root.winfo_width()
+        # 只留标题 + 右侧时间，其余部件全部隐藏
+        for wid in (self.status_canvas, self.status_label, self.status_spacer,
+                    self.btn_top, self.btn_dock, self.close_btn):
+            wid.pack_forget()
         self.list_frame.pack_forget()
         self.input_frame.pack_forget()
         self.flash_bar.configure(height=0)   # 收起时隐藏绿闪条，避免额外高度
+        self.clock.pack(side="right", padx=10)
         hh = self.hdr.winfo_height() or 38
-        w = 220
-        if x < 0 or x > sw - w:
-            x = max(0, (sw - w) // 2)
-        self.root.geometry("%dx%d+%d+0" % (w, hh, x))
+        self.root.geometry("%dx%d+%d+0" % (max(w, 220), hh, max(0, x)))
         self.docked = True
-        self.btn_dock.configure(text="展开")
 
     def undock(self):
-        """从贴顶状态恢复成正常窗口。"""
+        """从贴顶状态恢复成正常窗口（横栏回到与展开态一致的位置和大小）。"""
         if not self.docked:
             return
         if self.normal_geom:
             self.root.geometry(self.normal_geom)
         self.flash_bar.configure(height=3)
+        self.clock.pack_forget()
         self._pack_header()   # 按正确顺序恢复顶栏所有部件
         self.list_frame.pack(fill="both", expand=True, padx=0, pady=0)
         self.input_frame.pack(fill="x")
         self.docked = False
-        self.btn_dock.configure(text="收起")
         self.scroll_to_bottom()
         self._reset_idle()
 
+    def _hdr_click(self, *a):
+        """贴顶状态下点击横栏任意位置 → 展开。"""
+        if self.docked:
+            self.undock()
+
+    def _tick_clock(self):
+        """贴顶横栏右侧的时钟（每秒刷新）。"""
+        try:
+            if self.docked:
+                self.clock.configure(text=time.strftime("%H:%M:%S"))
+        except Exception:
+            pass
+        self.root.after(1000, self._tick_clock)
+
     # ----------------------------------------------------------- 空闲计时
     def _activity(self, *a):
-        if self.docked:
-            # 用户碰了收起的小条，先展开
-            self.undock()
+        # 贴顶时鼠标划过不再自动展开（避免想看时钟时横栏闪开）；点击横栏才展开
         self._reset_idle()
 
     def _reset_idle(self):

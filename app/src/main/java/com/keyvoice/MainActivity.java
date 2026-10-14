@@ -4,6 +4,8 @@ import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.BroadcastReceiver;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
@@ -50,6 +52,8 @@ public class MainActivity extends Activity {
     private final Handler h = new Handler(Looper.getMainLooper());
     private Config cfg;
     private boolean sending = false;
+    /** 电脑发来的消息正在回填输入框：期间抑制自动发送，避免原样回发形成死循环 */
+    private boolean fromPc = false;
 
     /**
      * 输入区高度（dp）。刻意写死而不依赖 WRAP_CONTENT：
@@ -74,6 +78,14 @@ public class MainActivity extends Activity {
     private boolean commitWait = false;
     /** 暂停态：已暂时松开长按，等再次点击恢复 */
     private boolean paused = false;
+    /**
+     * 发送防抖（毫秒）。讯飞出字经常分多次提交：先提交半句，随后再提交带标点的整句修正。
+     * 原逻辑「COMMIT 后 700ms 就发 + 普通自动发送 1200ms」会让两次提交各自发出一条消息，
+     * 且第二条包含第一条的部分内容（用户报告的“一条语音被分成两条且内容重复”）。
+     * 现统一为：任何文字变化都重置同一个防抖计时器，静默期过后才发送，
+     * 发送内容取当时的完整文本 → 一次语音只发一条完整消息。
+     */
+    private static final long SEND_DEBOUNCE_MS = 1500L;
 
     // ---------------------------------------------------------------- 输入框调节
     /** 输入框是否处于调节模式（长按 5 秒进入） */
@@ -405,21 +417,54 @@ public class MainActivity extends Activity {
 
             @Override public void afterTextChanged(Editable s) {
                 if (KeyTriggerService.holding) return;
-                if (commitWait && s != null && !s.toString().trim().isEmpty()) {
-                    commitWait = false;
-                    h.removeCallbacks(autoSendTask);
-                    h.postDelayed(() -> doSend(false), 700);
-                    return;
-                }
-                if (!cfg.autoSend()) return;
+                if (fromPc) return;   // 电脑发来的消息回填输入框，不再自动回发到电脑
                 if (s == null || s.toString().trim().isEmpty()) return;
+                boolean releaseFlow = commitWait;   // 本次变化属于“松开长按后讯飞出字”流程
+                commitWait = false;
+                // 松开流程必发；普通输入尊重设置里的「自动发送」开关
+                if (!releaseFlow && !cfg.autoSend()) return;
+                // 统一防抖：每次文字变化都重置计时器，静默期后一次性发送完整文本
                 h.removeCallbacks(autoSendTask);
-                h.postDelayed(autoSendTask, cfg.idleMs());
+                long wait = Math.max(cfg.idleMs(), SEND_DEBOUNCE_MS);
+                h.postDelayed(autoSendTask, wait);
             }
         });
 
         registerReceiver(commit, new IntentFilter("com.keyvoice.COMMIT"));
         registerReceiver(result, new IntentFilter(VoiceService.ACTION_RESULT));
+
+        // PC → 手机：启动局域网接收服务（端口 17892）。
+        // 处理逻辑仿照 PC 端「收到消息」：插入输入框光标处（等同上屏）+ 存剪贴板 + 提示。
+        LanServer.start(text -> postPcMessage(text));
+    }
+
+    /** PC → 手机：把电脑发来的文字插入输入框光标处 + 存剪贴板 + 提示 */
+    private void handlePcMessage(String text) {
+        if (et == null || text == null || text.isEmpty()) return;
+        fromPc = true;
+        try {
+            int pos = et.getSelectionStart();
+            if (pos < 0) pos = et.getText() == null ? 0 : et.getText().length();
+            et.getText().insert(pos, text);
+        } finally {
+            fromPc = false;
+        }
+        try {
+            ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("keyvoice", text));
+        } catch (Exception ignored) { }
+        showCenterTip("已收到电脑消息（已入框+存剪贴板）");
+    }
+
+    /** 供 LanServer 投递：页面在前台才处理；不在前台时记日志并丢弃 */
+    static boolean postPcMessage(String text) {
+        MainActivity a = resumed;
+        if (a == null) {
+            android.util.Log.w("KeyVoiceMsg", "page not resumed, drop pc message: " + text);
+            return false;
+        }
+        a.runOnUiThread(() -> a.handlePcMessage(text));
+        return true;
     }
 
     /** 居中短提示（约 800ms 后消失） */
@@ -551,10 +596,32 @@ public class MainActivity extends Activity {
         saveInputLayout();
     }
 
+    /**
+     * 输入框允许的最大缩放：缩放后必须完整落在父容器（即屏幕可用区）内。
+     * 输入框宽度 = 父容器宽度，所以宽度方向的上限就是 1.0（再大必然超出屏幕），
+     * 纵向则由父容器高度与输入框高度之比决定。
+     */
+    private float maxInputScale() {
+        if (inputWrap == null) return INPUT_SCALE_MAX;
+        ViewGroup p = (ViewGroup) inputWrap.getParent();
+        if (p == null || p.getWidth() <= 0 || p.getHeight() <= 0) return INPUT_SCALE_MAX;
+        int w = inputWrap.getWidth(), hgt = inputWrap.getHeight();
+        if (w <= 0 || hgt <= 0) return INPUT_SCALE_MAX;
+        float byW = p.getWidth() / (float) w;
+        float byH = p.getHeight() / (float) hgt;
+        return clamp(Math.min(INPUT_SCALE_MAX, Math.min(byW, byH)), INPUT_SCALE_MIN, INPUT_SCALE_MAX);
+    }
+
     private void scaleInput(float factor) {
-        float s = clamp(inputWrap.getScaleX() * factor, INPUT_SCALE_MIN, INPUT_SCALE_MAX);
+        float cap = maxInputScale();
+        float cur = inputWrap.getScaleX();
+        float s = clamp(cur * factor, INPUT_SCALE_MIN, cap);
+        if (factor > 1f && cur >= cap - 0.001f) {
+            showCenterTip("已放大到屏幕上限");
+        }
         inputWrap.setScaleX(s);
         inputWrap.setScaleY(s);
+        clampInputTranslation();   // 缩放后同步钳制位移，保证不出屏
         saveInputLayout();
     }
 
@@ -590,6 +657,7 @@ public class MainActivity extends Activity {
         inputWrap.setTranslationY(ty);
         float s = cfg.inputScale();
         if (s < INPUT_SCALE_MIN || s > INPUT_SCALE_MAX) s = 1f;
+        s = clamp(s, INPUT_SCALE_MIN, maxInputScale());   // 历史存档里过大的缩放也压回屏幕内
         inputWrap.setScaleX(s);
         inputWrap.setScaleY(s);
         inputWrap.setRotation(cfg.inputFlip() ? 180f : 0f);
@@ -638,16 +706,15 @@ public class MainActivity extends Activity {
     /**
      * 按配置决定屏幕方向。
      * <p>
-     * 默认（未开启倒置）调用 {@code setRequestedOrientation(UNSPECIFIED)}，
-     * 跟随系统/传感器 —— 这样倒置手机时系统状态栏、返回键、Home 等基础控件
-     * 保持在原位，不会被搬到屏幕顶部（用户反馈的问题）。
-     * 开启「倒置显示」后才锁 REVERSE_PORTRAIT。
+     * 本应用只支持【竖屏】与【翻转竖屏】，永不横屏：
+     * 默认锁定 {@code SCREEN_ORIENTATION_PORTRAIT}（旋转手机也不会横过来）；
+     * 设置里开启「倒置显示」后锁定 {@code SCREEN_ORIENTATION_REVERSE_PORTRAIT}（180° 反向竖屏）。
      */
     private void applyOrientation() {
         if (cfg == null) return;
         setRequestedOrientation(cfg.invertMode()
                 ? android.content.pm.ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT
-                : android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+                : android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
     }
 
     @Override
