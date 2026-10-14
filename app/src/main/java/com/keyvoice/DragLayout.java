@@ -37,6 +37,7 @@ public class DragLayout extends RelativeLayout {
     private View selected = null;
     private final Map<View, Drawable> origBg = new HashMap<>();
     private ImageButton checkBtn;
+    private ImageButton flipBtn;
     private final Handler h = new Handler(Looper.getMainLooper());
     private Config cfg;
 
@@ -90,8 +91,39 @@ public class DragLayout extends RelativeLayout {
         checkBtn.setLayoutParams(cp);
         checkBtn.setVisibility(View.GONE);
         checkBtn.setContentDescription("完成布局");
+        // 必须先分配 ID：下面 flipBtn 用 addRule(BELOW, checkBtn.getId()) 定位，
+        // 没有 ID 时 getId() 返回 NO_ID(-1)，BELOW 规则失效，flipBtn 会跟 ✓ 重叠。
+        checkBtn.setId(View.generateViewId());
         checkBtn.setOnClickListener(v -> exitEdit());
         addView(checkBtn);
+
+        // 编辑态的「上下颠倒」按钮：点一次把选中按钮旋转 180°，再点一次转回
+        flipBtn = new ImageButton(c);
+        flipBtn.setImageResource(R.drawable.ic_flip);
+        flipBtn.setColorFilter(0xFFFFFFFF);
+        flipBtn.setBackground(Ui.buttonBg(Ui.warning(c), Ui.shade(Ui.warning(c), -0.28f),
+                (float) Ui.dp(c, 22) / 2f));
+        int fs = Ui.dp(c, 44);
+        RelativeLayout.LayoutParams fp = new RelativeLayout.LayoutParams(fs, fs);
+        // 不用 addRule(BELOW, checkBtn.getId())：锚点 checkBtn 常驻 GONE，
+        // RelativeLayout 会忽略指向 GONE 视图的 BELOW 规则，两个按钮会完全重叠
+        // （实测两者 bounds 完全相同）。改用显式 topMargin：
+        // checkBtn 在 top+8dp、高 44dp，所以 flipBtn 放 top + 8 + 44 + 8 = 60dp。
+        fp.addRule(ALIGN_PARENT_RIGHT);
+        fp.addRule(ALIGN_PARENT_TOP);
+        fp.setMargins(Ui.dp(c, 8), Ui.dp(c, 60), Ui.dp(c, 8), 0);
+        flipBtn.setLayoutParams(fp);
+        flipBtn.setVisibility(View.GONE);
+        flipBtn.setContentDescription("上下颠倒 180 度");
+        flipBtn.setOnClickListener(v -> toggleFlip());
+        addView(flipBtn);
+    }
+
+    /** 把当前选中的按钮旋转 180°（上下颠倒），已在翻转态则转回正向 */
+    public void toggleFlip() {
+        if (selected == null) return;
+        float r = selected.getRotation();
+        selected.setRotation(r >= 180f ? r - 180f : r + 180f);
     }
 
     public void setConfig(Config cfg) { this.cfg = cfg; }
@@ -102,8 +134,8 @@ public class DragLayout extends RelativeLayout {
         float x = e.getX(), y = e.getY();
         lastX = x; lastY = y;
         if (editMode) {
-            // 例外：√ 按钮不被拦截，保证可点击退出
-            if (pointInView(checkBtn, x, y)) return false;
+            // 例外：✓ 与「上下颠倒」按钮不被拦截，保证可点击
+            if (pointInView(checkBtn, x, y) || pointInView(flipBtn, x, y)) return false;
             return true;
         }
         switch (e.getActionMasked()) {
@@ -178,6 +210,8 @@ public class DragLayout extends RelativeLayout {
         }
         checkBtn.setVisibility(View.VISIBLE);
         checkBtn.bringToFront();
+        flipBtn.setVisibility(View.VISIBLE);
+        flipBtn.bringToFront();
     }
 
     public void exitEdit() {
@@ -189,6 +223,7 @@ public class DragLayout extends RelativeLayout {
         origBg.clear();
         selected = null;
         checkBtn.setVisibility(View.GONE);
+        flipBtn.setVisibility(View.GONE);
         savePositions();
     }
 
@@ -228,7 +263,8 @@ public class DragLayout extends RelativeLayout {
             float fy = clamp((ch.getY() + ch.getHeight() / 2f) / H, 0, 1);
             sb.append("\"").append(ch.getTag()).append("\":[")
               .append(round(fx)).append(",").append(round(fy)).append(",")
-              .append(round(ch.getScaleX())).append("]");
+              .append(round(ch.getScaleX())).append(",")
+              .append(ch.getRotation() >= 180f ? 1 : 0).append("]");
         }
         sb.append("}");
         cfg.layoutJson(sb.toString());
@@ -243,7 +279,9 @@ public class DragLayout extends RelativeLayout {
         if (pos.isEmpty()) return;   // 无存档：保持默认规则布局，不做任何位移
         for (Map.Entry<String, float[]> e : pos.entrySet()) {
             float[] p = e.getValue();
-            apply(e.getKey(), p[0], p[1], p[2]);
+            // 存档可能是 [fx,fy,scale] 或 [fx,fy,scale,flipped]，做长度兼容
+            int flipped = (p.length >= 4) ? (int) p[3] : 0;
+            apply(e.getKey(), p[0], p[1], p[2], flipped);
         }
         dumpGeometry("restore");
     }
@@ -259,6 +297,11 @@ public class DragLayout extends RelativeLayout {
      *     这样即使存档来自别的屏幕尺寸/方向，也不会整体跑到可视区外（按钮“丢失”）。
      */
     private void apply(String key, float fx, float fy, float scale) {
+        apply(key, fx, fy, scale, 0);
+    }
+
+    /** 带翻转标记的重载：flipped=1 表示该按钮被旋转了 180° */
+    private void apply(String key, float fx, float fy, float scale, int flipped) {
         View v = findByTag(key);
         if (v == null) return;
         int w = v.getWidth();
@@ -282,6 +325,7 @@ public class DragLayout extends RelativeLayout {
         v.setTranslationX(0f);
         v.setTranslationY(0f);
         v.setScaleX(scale); v.setScaleY(scale);
+        v.setRotation(flipped == 1 ? 180f : 0f);   // 还原上下颠倒状态
     }
 
     /**

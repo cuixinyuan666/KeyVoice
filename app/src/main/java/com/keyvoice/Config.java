@@ -164,4 +164,31 @@ public class Config {
     /** dark（默认）/ light */
     public String theme() { return sp.getString("theme", "dark"); }
     public void theme(String v) { sp.edit().putString("theme", v).apply(); }
+
+    // ---------------------------------------------------------------- 输入框布局
+    // 输入框也可长按调节：位移（translationX/Y，像素）+ 缩放 + 上下颠倒。
+    // 一并写入 SharedPreferences，App 关闭后依然保留。
+
+    /**
+     * 是否强制「倒置显示」（reversePortrait）。
+     * <p>
+     * 默认 false：App 跟随系统方向，倒置手机时系统返回键/Home 等基础控件
+     * 保持在原位，不会被搬到屏幕顶部。
+     * 设为 true 时 App 内容会旋转 180°，需要把手机倒过来拿才是正的。
+     */
+    public boolean invertMode() { return sp.getBoolean("invert_mode", false); }
+    public void invertMode(boolean v) { sp.edit().putBoolean("invert_mode", v).apply(); }
+
+    public float inputTx() { return sp.getFloat("input_tx", 0f); }
+    public void inputTx(float v) { sp.edit().putFloat("input_tx", v).apply(); }
+
+    public float inputTy() { return sp.getFloat("input_ty", 0f); }
+    public void inputTy(float v) { sp.edit().putFloat("input_ty", v).apply(); }
+
+    public float inputScale() { return sp.getFloat("input_scale", 1f); }
+    public void inputScale(float v) { sp.edit().putFloat("input_scale", v).apply(); }
+
+    /** 输入框是否上下颠倒（旋转 180°） */
+    public boolean inputFlip() { return sp.getBoolean("input_flip", false); }
+    public void inputFlip(boolean v) { sp.edit().putBoolean("input_flip", v).apply(); }
 }

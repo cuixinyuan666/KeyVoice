@@ -49,6 +49,7 @@ public class SettingsActivity extends Activity {
     private CheckBox cbAutoSend, cbAutoClose, cbNewline;
     private CheckBox cbResident, cbContinuous, cbMedia, cbVibrate, cbAutoStart;
     private CheckBox cbKeepScreen;
+    private CheckBox cbInvert;
 
     private final List<String> engineLabels = new ArrayList<>();
     private final List<String> engineComps = new ArrayList<>();
@@ -56,6 +57,10 @@ public class SettingsActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // 方向跟随配置：默认跟随系统，避免倒置手机时系统返回/Home 被搬到顶部
+        setRequestedOrientation(new Config(this).invertMode()
+                ? android.content.pm.ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT
+                : android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
         cfg = new Config(this);
 
         ScrollView sv = new ScrollView(this);
@@ -245,8 +250,24 @@ public class SettingsActivity extends Activity {
         c8.addView(Ui.caption(this,
                 "外观设置选择后立即保存在本机，关闭 App 后依然生效。"
                 + "注意：切换主题会重建本页，本页其它分区未保存的改动会被丢弃。"
-                +                 "输入框外观改动需回到主页面后生效。"));
+                + "输入框外观改动需回到主页面后生效。"));
         root.addView(c8);
+
+        // ---- 屏幕方向 ----
+        LinearLayout c9 = Ui.sectionCard(this);
+        c9.addView(Ui.sectionTitle(this, "屏幕方向"));
+        cbInvert = check("「倒置显示」：App 内容旋转 180°，需把手机倒过来拿才是正的。\n"
+                + "（默认关闭：跟随系统方向，倒置手机时返回/Home 等系统控件不会被搬到顶部）",
+                cfg.invertMode());
+        cbInvert.setOnClickListener(v -> {
+            cfg.invertMode(cbInvert.isChecked());
+            tvInfo.setText(cbInvert.isChecked()
+                    ? "已开启倒置显示，重启 App 后生效"
+                    : "已关闭倒置显示，重启 App 后生效");
+            tvInfo.postDelayed(() -> { if (tvInfo != null) tvInfo.setText(""); }, 2000);
+        });
+        c9.addView(cbInvert);
+        root.addView(c9);
 
         tvInfo = Ui.caption(this, "");
         root.addView(tvInfo);
@@ -520,6 +541,8 @@ public class SettingsActivity extends Activity {
         cfg.fontFamily(Ui.FONT_VALUES[safePos(spFont, 0)]);
         int si = safePos(spFontSize, 2);
         cfg.fontSize(Ui.FONT_SIZES[si]);
+        // 屏幕方向（倒置显示）
+        if (cbInvert != null) cfg.invertMode(cbInvert.isChecked());
     }
 
     private int safePos(Spinner s, int def) {

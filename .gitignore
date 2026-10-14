@@ -16,3 +16,6 @@ __pycache__/
 *.jks
 *.keystore
 keystore.properties
+
+# WorkBuddy 本地工作数据（不进仓库）
+.workbuddy-ai/

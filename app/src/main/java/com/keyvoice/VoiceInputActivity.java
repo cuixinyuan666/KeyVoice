@@ -65,6 +65,10 @@ public class VoiceInputActivity extends Activity {
         super.onCreate(savedInstanceState);
         instance = this;
         cfg = new Config(this);
+        // 方向跟随配置：默认跟随系统，避免倒置手机时系统返回/Home 被搬到顶部
+        setRequestedOrientation(cfg.invertMode()
+                ? android.content.pm.ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT
+                : android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
 
         setContentView(R.layout.activity_voice);
 
