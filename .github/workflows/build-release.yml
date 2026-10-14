@@ -62,6 +62,6 @@ jobs:
               （Manifest 仍缺 `POST_NOTIFICATIONS`，属体验项，非崩溃）。
             - 小米/HyperOS、OPPO、vivo 等需在设置里给 KeyVoice 开启「自启动 / 允许后台运行 / 电池无限制」，
               否则灭屏后前台服务易被回收。
-        files: app/build/outputs/apk/debug/app-debug.apk
+          files: app/build/outputs/apk/debug/app-debug.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
