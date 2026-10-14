@@ -15,4 +15,23 @@
     <color name="kv_success">#34D399</color>
     <color name="kv_warning">#FBBF24</color>
     <color name="kv_error">#F87171</color>
+
+    <!-- KeyVoice light theme tokens（「主题选择」新增） -->
+    <color name="kvl_bg">#F2F4F8</color>
+    <color name="kvl_surface">#FFFFFF</color>
+    <color name="kvl_surface_hi">#FFFFFF</color>
+    <color name="kvl_border">#D3DAE4</color>
+    <color name="kvl_text">#1B2230</color>
+    <color name="kvl_text2">#5A6577</color>
+    <color name="kvl_text3">#8A94A6</color>
+
+    <!-- 输入框文字颜色可选项（设置页色板） -->
+    <color name="sw_white">#FFFFFF</color>
+    <color name="sw_yellow">#FFE082</color>
+    <color name="sw_green">#A5D6A7</color>
+    <color name="sw_cyan">#80DEEA</color>
+    <color name="sw_pink">#F48FB1</color>
+    <color name="sw_orange">#FFCC80</color>
+    <color name="sw_lavender">#B39DDB</color>
+    <color name="sw_lime">#E6EE9C</color>
 </resources>

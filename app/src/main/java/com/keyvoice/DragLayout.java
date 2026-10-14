@@ -30,6 +30,7 @@ public class DragLayout extends RelativeLayout {
     private final Set<String> KEYS = new HashSet<>();
     {
         KEYS.add("s"); KEYS.add("h"); KEYS.add("e");
+        KEYS.add("c"); KEYS.add("p");
     }
 
     private boolean editMode = false;
@@ -335,23 +336,34 @@ public class DragLayout extends RelativeLayout {
 
         int bs = Ui.dp(getContext(), 38);
         int gap = Ui.dp(getContext(), 16);
-        resetView("s", ALIGN_PARENT_RIGHT, CENTER_VERTICAL, 0, 0, bs, bs);
-        resetView("h", ALIGN_PARENT_RIGHT, BELOW, 0, gap, bs, bs);
-        resetView("e", ALIGN_PARENT_RIGHT, BELOW, 0, gap, bs, bs);
+        // 五个按钮默认布局：s 右中，其余依次向下排列
+        String[] chain = {"s", "h", "e", "c", "p"};
+        String prev = null;
+        for (String key : chain) {
+            boolean first = prev == null;
+            resetView(key, ALIGN_PARENT_RIGHT,
+                    first ? CENTER_VERTICAL : BELOW,
+                    0, first ? 0 : gap, bs, bs, prev);
+            prev = key;
+        }
         dumpGeometry("reset");
     }
 
     /** 把某个 tag 的按钮恢复成规则布局（右侧对齐 + 依次向下），并清零缩放/位移。 */
-    private void resetView(String key, int rule1, int rule2, int m1, int m2, int bw, int bh) {
+    private void resetView(String key, int rule1, int rule2, int m1, int m2, int bw, int bh, String prevKey) {
         View v = findByTag(key);
         if (v == null) return;
         RelativeLayout.LayoutParams lp = new RelativeLayout.LayoutParams(bw, bh);
         clearRules(lp);
         if (rule1 != 0) lp.addRule(rule1);
-        if (rule2 != 0) lp.addRule(rule2);
-        if (rule2 == BELOW) {
-            View prev = findByTag("s".equals(key) ? "s" : "h".equals(key) ? "s" : "h");
-            if (prev != null) lp.addRule(BELOW, prev.getId());
+        if (rule2 == CENTER_VERTICAL) {
+            lp.addRule(CENTER_VERTICAL);
+        } else if (rule2 == BELOW) {
+            // prevKey 为空说明是链首，退化为仅右对齐
+            if (prevKey != null) {
+                View prev = findByTag(prevKey);
+                if (prev != null) lp.addRule(BELOW, prev.getId());
+            }
         }
         lp.leftMargin = m1;
         lp.topMargin = m2;
@@ -401,6 +413,28 @@ public class DragLayout extends RelativeLayout {
         } catch (Exception e) {
             Log.w(TAG, "dumpGeometry failed", e);
         }
+    }
+
+    /** 容器与三个按钮的几何报告（供界面直接展示，不依赖 adb / logcat）。 */
+    public String reportGeometry() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("container ").append(getWidth()).append("x").append(getHeight())
+          .append(" vis=").append(getVisibility())
+          .append(" editMode=").append(editMode);
+        for (int i = 0; i < getChildCount(); i++) {
+            View ch = getChildAt(i);
+            if (ch == checkBtn || ch.getTag() == null) continue;
+            RelativeLayout.LayoutParams lp = asRelativeParams(ch);
+            sb.append('\n').append(ch.getTag())
+              .append(": w=").append(ch.getWidth())
+              .append(" h=").append(ch.getHeight())
+              .append(" x=").append(Math.round(ch.getX()))
+              .append(" y=").append(Math.round(ch.getY()))
+              .append(" scale=").append(ch.getScaleX())
+              .append(" lm=").append(lp.leftMargin)
+              .append(" tm=").append(lp.topMargin);
+        }
+        return sb.toString();
     }
 
     private View findByTag(String key) {

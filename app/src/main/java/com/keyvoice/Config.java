@@ -144,4 +144,24 @@ public class Config {
     /** 主页面三个按钮的布局：JSON {"s":[fx,fy,scale],"h":[...],"e":[...]}（归一化坐标） */
     public String layoutJson() { return sp.getString("layout", ""); }
     public void layoutJson(String v) { sp.edit().putString("layout", v).apply(); }
+
+    // ---------------------------------------------------------------- 输入框外观
+    // 均写入 SharedPreferences，App 关闭后依然保留（apply() 为异步落盘，进程被杀也不丢）
+
+    /** 输入框文字颜色（ARGB），0 表示「跟随主题」；默认跟随主题 */
+    public int inputTextColor() { return sp.getInt("text_color", 0); }
+    public void textColor(int v) { sp.edit().putInt("text_color", v).apply(); }
+
+    /** 输入框字号（sp），默认 15 */
+    public int fontSize() { return sp.getInt("font_size", 15); }
+    public void fontSize(int v) { sp.edit().putInt("font_size", v).apply(); }
+
+    /** 输入框字体：sans / serif / monospace */
+    public String fontFamily() { return sp.getString("font_family", "sans"); }
+    public void fontFamily(String v) { sp.edit().putString("font_family", v).apply(); }
+
+    // ---------------------------------------------------------------- 主题
+    /** dark（默认）/ light */
+    public String theme() { return sp.getString("theme", "dark"); }
+    public void theme(String v) { sp.edit().putString("theme", v).apply(); }
 }

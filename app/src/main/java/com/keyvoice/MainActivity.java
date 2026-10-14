@@ -42,7 +42,7 @@ public class MainActivity extends Activity {
 
     private EditText et;
     private ImageView statusDot, arrow;
-    private ImageButton btnHold, btnSend, btnSettings;
+    private ImageButton btnHold, btnSend, btnSettings, btnClear, btnPause;
     private DragLayout side;
     private FrameLayout overlay;
     private TextView tip;
@@ -51,16 +51,28 @@ public class MainActivity extends Activity {
     private boolean sending = false;
 
     /**
-     * 输入区固定高度（dp）。刻意写死而不依赖 WRAP_CONTENT：
+     * 输入区高度（dp）。刻意写死而不依赖 WRAP_CONTENT：
      * inputWrap 内含 ALIGN_PARENT_BOTTOM 的状态点，WRAP_CONTENT 高度在该组合下无法
      * 收敛，会膨胀到占满父容器，把下方 weight=1 的按钮区挤成 0 高度。
-     * 三个按钮需要约 3*38 + 2*16 = 146dp，此值保证两者都放得下。
+     * 取值 200dp：输入框约占屏幕 1/3（远大于早期的 120dp），同时仍给五个按钮留足空间
+     * （5 个按钮 + 4 个间距 ≈ 5*38 + 4*16 = 254dp）。
      */
-    private static final int INPUT_WRAP_DP = 120;
+    private static final int INPUT_WRAP_DP = 200;
+
+    /**
+     * 竖排提示条尺寸（dp）。
+     *   TIP_BAR_*  = overlay 自身占位（按【旋转后】的窄高条给定，避免旋转后超出被裁剪）
+     *   TIP_TEXT_W = TextView 旋转前的宽度（旋转后成为竖向长度）
+     */
+    private static final int TIP_BAR_W_DP = 64;
+    private static final int TIP_BAR_H_DP = 300;
+    private static final int TIP_TEXT_W_DP = 280;
     /** 局域网模式未连接时，最多自动搜索连接一次 */
     private boolean lanAutoScanned = false;
     /** 模拟空格“松开”后置位：等讯飞出字后立即发送（优先于普通自动发送） */
     private boolean commitWait = false;
+    /** 暂停态：已暂时松开长按，等再次点击恢复 */
+    private boolean paused = false;
 
     // ---- 首启权限引导（保留，仅在设置页手动触发；不再自动弹）----
     private boolean onboardingActive = false;
@@ -107,8 +119,10 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         cfg = new Config(this);
+        // 主题：来自 Config 持久化，必须在构建任何视图之前设置，颜色 token 才会取对色板
+        Ui.setTheme(cfg.theme());
 
-        // 根用 FrameLayout：内容垂直排列 + 一个居中、仅覆盖自身范围的小提示层（不挡按钮）
+        // 根用 FrameLayout：内容垂直排列 + 一个左侧竖排提示层（不挡按钮）
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(Ui.bg(this));
         int pad = Ui.dp(this, 16);
@@ -142,6 +156,8 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
         etp.addRule(RelativeLayout.ALIGN_PARENT_TOP);
         et.setLayoutParams(etp);
+        // 应用持久化的输入框外观（颜色 / 字体 / 字号）
+        Ui.applyInputStyle(et, cfg, Ui.text(this));
         inputWrap.addView(et);
 
         statusDot = new ImageView(this);
@@ -200,12 +216,12 @@ public class MainActivity extends Activity {
         // ---- 右侧可拖动按钮容器 ----
         side = new DragLayout(this);
         side.setConfig(cfg);
-        // weight=1 占据输入框之下的全部剩余空间；同时设 minHeight 作为保险，
-        // 即使父容器高度异常，按钮容器也不会塌成 0 高度导致三个按钮不可见。
+        // weight=1 占据输入框之下的全部剩余空间；minHeight 覆盖五个按钮（约 254dp）
+        // 的排布需求，防止容器塌成 0 高度导致按钮不可见。
         LinearLayout.LayoutParams sideLp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
         side.setLayoutParams(sideLp);
-        side.setMinimumHeight(Ui.dp(this, 200));
+        side.setMinimumHeight(Ui.dp(this, 300));
 
         int bs = Ui.dp(this, 38);
         btnSettings = Ui.iconButton(this, R.drawable.ic_gear, Ui.text2(this), 38);
@@ -230,7 +246,7 @@ public class MainActivity extends Activity {
         btnHold.setLayoutParams(hlp);
         btnHold.setOnClickListener(v -> onHoldClick());
 
-        btnSend = Ui.iconButton(this, R.drawable.ic_monitor, Ui.success(this), 38);
+        btnSend = Ui.iconButton(this, R.drawable.ic_send, Ui.success(this), 38);
         btnSend.setId(View.generateViewId());
         btnSend.setTag("e");
         btnSend.setContentDescription("电脑上屏（松开并发送）");
@@ -241,28 +257,76 @@ public class MainActivity extends Activity {
         btnSend.setLayoutParams(slp);
         btnSend.setOnClickListener(v -> onSendClick());
 
+        // ---- 清除输入框 ----
+        btnClear = Ui.iconButton(this, R.drawable.ic_clear, Ui.text2(this), 38);
+        btnClear.setId(View.generateViewId());
+        btnClear.setTag("c");
+        btnClear.setContentDescription("清除输入框内容");
+        RelativeLayout.LayoutParams clp = new RelativeLayout.LayoutParams(bs, bs);
+        clp.addRule(RelativeLayout.ALIGN_PARENT_RIGHT);
+        clp.addRule(RelativeLayout.BELOW, btnSend.getId());
+        clp.topMargin = Ui.dp(this, 16);
+        btnClear.setLayoutParams(clp);
+        btnClear.setOnClickListener(v -> {
+            et.setText("");
+            showCenterTip("已清空输入框");
+        });
+
+        // ---- 暂停 / 恢复长按（单键切换）----
+        btnPause = Ui.iconButton(this, R.drawable.ic_pause, Ui.warning(this), 38);
+        btnPause.setId(View.generateViewId());
+        btnPause.setTag("p");
+        btnPause.setContentDescription("暂停 / 恢复长按");
+        RelativeLayout.LayoutParams plp = new RelativeLayout.LayoutParams(bs, bs);
+        plp.addRule(RelativeLayout.ALIGN_PARENT_RIGHT);
+        plp.addRule(RelativeLayout.BELOW, btnClear.getId());
+        plp.topMargin = Ui.dp(this, 16);
+        btnPause.setLayoutParams(plp);
+        btnPause.setOnClickListener(v -> onPauseClick());
+        updatePauseIcon();
+
         side.addView(btnSettings);
         side.addView(btnHold);
         side.addView(btnSend);
+        side.addView(btnClear);
+        side.addView(btnPause);
         content.addView(side);
 
         root.addView(content);
 
-        // ---- 居中短提示层（仅覆盖自身范围，不挡按钮）----
+        // ---- 左侧竖排短提示层 ----
+        // 位置：本页是 reversePortrait，Activity 内容在屏幕上被旋转 180°，
+        //   视图坐标系的左边缘正好映射到【倒持后用户视野的左侧】，所以用 Gravity.LEFT。
+        // 方向：TextView 加 -90° 旋转，使文字竖向排列（叠加 Activity 的 180° 后，
+        //   用户看到的是自上而下阅读）。
+        // 布局：overlay 按【旋转后的占位】给定宽高（窄高条），避免旋转后被裁剪。
         overlay = new FrameLayout(this);
-        overlay.setLayoutParams(new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER));
+        FrameLayout.LayoutParams ovLp = new FrameLayout.LayoutParams(
+                Ui.dp(this, TIP_BAR_W_DP), Ui.dp(this, TIP_BAR_H_DP),
+                Gravity.LEFT | Gravity.CENTER_VERTICAL);
+        overlay.setLayoutParams(ovLp);
         overlay.setVisibility(View.GONE);
         overlay.setClickable(false);
+
         tip = new TextView(this);
         tip.setTextSize(15);
         tip.setTypeface(null, android.graphics.Typeface.BOLD);
-        tip.setTextColor(Color.WHITE);
+        // 深色主题下提示底是深色 -> 用白字；浅色主题提示底是白色 -> 跟随主题文字色
+        tip.setTextColor(Ui.isLight() ? Ui.text(this) : Color.WHITE);
         tip.setGravity(Gravity.CENTER);
         tip.setMaxWidth(Ui.dp(this, 280));
         tip.setBackground(Ui.round(Ui.surfaceHi(this), Ui.border(this), 1, Ui.dp(this, 12)));
         tip.setPadding(Ui.dp(this, 16), Ui.dp(this, 12), Ui.dp(this, 16), Ui.dp(this, 12));
+        // 旋转前是「宽而扁」的一条，旋转 -90° 后变成竖向长条
+        FrameLayout.LayoutParams tipLp = new FrameLayout.LayoutParams(
+                Ui.dp(this, TIP_TEXT_W_DP), ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER);
+        tip.setLayoutParams(tipLp);
+        tip.setRotation(-90f);
         overlay.addView(tip);
+        // 不裁剪子 View，保证旋转后的 TextView 完整可见
+        overlay.setClipChildren(false);
+        overlay.setClipToPadding(false);
+        root.setClipChildren(false);
         root.addView(overlay);
 
         setContentView(root);
@@ -351,6 +415,53 @@ public class MainActivity extends Activity {
     }
 
     /**
+     * 暂停 / 恢复长按（单键切换）。
+     *   - 正在按住中 → 暂时松开（走与「电脑上屏」一致的 endHold，讯飞停止识别），进入暂停态
+     *   - 暂停态     → 重新开始按住，恢复听写
+     * 图标随之在 暂停(∮)/播放(▶) 之间切换。
+     */
+    private void onPauseClick() {
+        if (paused) {
+            // 恢复长按
+            if (KeyTriggerService.instance == null) {
+                showCenterTip("需要无障碍服务（注入手势用）。点右下角箭头去开启");
+                return;
+            }
+            if (KeyTriggerService.holding) {          // 已被别处恢复，同步状态即可
+                paused = false;
+                updatePauseIcon();
+                return;
+            }
+            if (KeyTriggerService.instance.beginHoldFromUi()) {
+                paused = false;
+                updatePauseIcon();
+                showCenterTip("已恢复长按，请继续说话");
+            } else {
+                showCenterTip("上一次长按正在复位中，稍等 1 秒再点");
+            }
+            return;
+        }
+
+        // 暂停：松开长按
+        if (KeyTriggerService.holding) {
+            setHoldActive(false);
+            if (KeyTriggerService.instance != null) KeyTriggerService.instance.endHold();
+            paused = true;
+            updatePauseIcon();
+            showCenterTip("已暂停长按；再点一次恢复");
+        } else {
+            showCenterTip("当前没有正在按住的长按");
+        }
+    }
+
+    /** 暂停态显示播放键（提示"点我恢复"），否则显示暂停键 */
+    private void updatePauseIcon() {
+        if (btnPause == null) return;
+        btnPause.setImageResource(paused ? R.drawable.ic_play : R.drawable.ic_pause);
+        btnPause.setContentDescription(paused ? "恢复长按" : "暂停长按");
+    }
+
+    /**
      * 电脑上屏按钮：若正在“按住空格”则先松开（讯飞停止并出字，COMMIT 广播到达后自动发送），
      * 否则直接把框内现有文字发到电脑。
      */
@@ -376,6 +487,8 @@ public class MainActivity extends Activity {
         sending = true;
         setHoldActive(false);
         commitWait = false;
+        paused = false;
+        updatePauseIcon();
         h.removeCallbacks(autoSendTask);
         String finalText = text;
         Sender.send(this, text, (ok, msg) -> {
@@ -384,9 +497,19 @@ public class MainActivity extends Activity {
                 et.setText("");
                 showCenterTip("已发送：" + finalText);
             } else {
+                // 发送失败也要执行松开长按的逻辑，否则长按残留会让讯飞一直处于录音态
+                releaseHold();
                 showCenterTip("发送失败：" + msg);
             }
         });
+    }
+
+    /** 统一执行「松开长按」：复位按住态、结束无障碍注入、清除暂停标记 */
+    private void releaseHold() {
+        setHoldActive(false);
+        if (KeyTriggerService.instance != null) KeyTriggerService.instance.endHold();
+        paused = false;
+        updatePauseIcon();
     }
 
     @Override

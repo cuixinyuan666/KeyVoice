@@ -16,6 +16,9 @@ import android.provider.Settings;
 import android.speech.RecognitionService;
 import android.text.TextUtils;
 import android.view.ViewGroup;
+import android.content.res.ColorStateList;
+import android.view.View;
+import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.CheckBox;
@@ -40,6 +43,7 @@ public class SettingsActivity extends Activity {
     private EditText etHost, etPort;
     private TextView tvInfo, tvAdbHint;
     private Spinner spEngine, spAction;
+    private Spinner spTheme, spTextColor, spFont, spFontSize;
     private RadioGroup rgMode, rgTrans;
     private Button btnScan;
     private CheckBox cbAutoSend, cbAutoClose, cbNewline;
@@ -179,6 +183,71 @@ public class SettingsActivity extends Activity {
         c7.addView(bSave);
         root.addView(c7);
 
+        // ---- 外观（主题 / 输入框文字颜色 / 字体 / 字号）----
+        LinearLayout c8 = Ui.sectionCard(this);
+        c8.addView(Ui.sectionTitle(this, "外观"));
+
+        // 主题（切换后才立即持久化并重建本页以套用新色板）
+        // 注意：Spinner.onItemSelected 在【onLayout 阶段】才触发，晚于 onCreate 返回，
+        // 所以不能靠 boolean 标志栏——必须【与当前已保存值比较】，相同则不 recreate，
+        // 否则初始化回调会反复触发 recreate 造成无限重建循环。
+        c8.addView(Ui.body(this, "主题"));
+        spTheme = spinner(Ui.THEME_LABELS, indexOf(Ui.THEME_VALUES, cfg.theme()));
+        spTheme.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(AdapterView<?> p, View v, int pos, long id) {
+                if (pos < 0 || pos >= Ui.THEME_VALUES.length) return;
+                String next = Ui.THEME_VALUES[pos];
+                if (next.equals(cfg.theme())) return;   // 值的没变（含初始化回调），不重建
+                cfg.theme(next);
+                Ui.setTheme(next);
+                recreate();
+            }
+            @Override public void onNothingSelected(AdapterView<?> p) { }
+        });
+        c8.addView(spTheme);
+
+        // 输入框文字颜色（选择后立即持久化）
+        c8.addView(Ui.body(this, "输入框文字颜色"));
+        spTextColor = spinner(COLOR_LABELS, colorIndex(cfg.inputTextColor()));
+        spTextColor.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(AdapterView<?> p, View v, int pos, long id) {
+                if (pos <= 0 || pos >= COLOR_VALUES.length || pos >= COLOR_LABELS.length) return;
+                cfg.textColor(getResources().getColor(COLOR_VALUES[pos]));
+            }
+            @Override public void onNothingSelected(AdapterView<?> p) { }
+        });
+        c8.addView(spTextColor);
+
+        // 字体（选择后立即持久化）
+        c8.addView(Ui.body(this, "输入框字体"));
+        spFont = spinner(Ui.FONT_LABELS, indexOf(Ui.FONT_VALUES, cfg.fontFamily()));
+        spFont.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(AdapterView<?> p, View v, int pos, long id) {
+                if (pos < 0 || pos >= Ui.FONT_VALUES.length) return;
+                cfg.fontFamily(Ui.FONT_VALUES[pos]);
+            }
+            @Override public void onNothingSelected(AdapterView<?> p) { }
+        });
+        c8.addView(spFont);
+
+        // 字号（选择后立即持久化）
+        c8.addView(Ui.body(this, "输入框字号"));
+        spFontSize = spinner(Ui.FONT_SIZE_TXT, sizeIndex(cfg.fontSize()));
+        spFontSize.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(AdapterView<?> p, View v, int pos, long id) {
+                if (pos < 0 || pos >= Ui.FONT_SIZES.length) return;
+                cfg.fontSize(Ui.FONT_SIZES[pos]);
+            }
+            @Override public void onNothingSelected(AdapterView<?> p) { }
+        });
+        c8.addView(spFontSize);
+
+        c8.addView(Ui.caption(this,
+                "外观设置选择后立即保存在本机，关闭 App 后依然生效。"
+                + "注意：切换主题会重建本页，本页其它分区未保存的改动会被丢弃。"
+                +                 "输入框外观改动需回到主页面后生效。"));
+        root.addView(c8);
+
         tvInfo = Ui.caption(this, "");
         root.addView(tvInfo);
 
@@ -263,6 +332,52 @@ public class SettingsActivity extends Activity {
         c.setLayoutParams(lp);
         try { c.setButtonTintList(ColorStateList.valueOf(Ui.primary(this))); } catch (Exception ignored) { }
         return c;
+    }
+
+    // ------------------------------------------------------- 外观设置辅助
+
+    /** 输入框文字颜色色板：第一项「跟随主题」用 0 表示 */
+    private static final int[] COLOR_VALUES = {
+            Ui.COLOR_FOLLOW_THEME,
+            R.color.sw_white, R.color.sw_yellow, R.color.sw_green, R.color.sw_cyan,
+            R.color.sw_pink, R.color.sw_orange, R.color.sw_lavender, R.color.sw_lime,
+    };
+    private static final String[] COLOR_LABELS = {
+            "跟随主题", "白", "黄", "绿", "青", "粉", "橙", "紫", "黄绿",
+    };
+
+    /** 统一风格的 Spinner（下拉选中项用于外观设置） */
+    private Spinner spinner(String[] labels, int sel) {
+        Spinner s = new Spinner(this);
+        ArrayAdapter<String> ad = new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_dropdown_item, labels);
+        s.setAdapter(ad);
+        if (sel >= 0 && sel < labels.length) s.setSelection(sel);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = Ui.dp(this, 4);
+        s.setLayoutParams(lp);
+        return s;
+    }
+
+    private int indexOf(String[] arr, String v) {
+        if (v == null) return 0;
+        for (int i = 0; i < arr.length; i++) if (v.equals(arr[i])) return i;
+        return 0;
+    }
+
+    private int sizeIndex(int sp) {
+        for (int i = 0; i < Ui.FONT_SIZES.length; i++) if (Ui.FONT_SIZES[i] == sp) return i;
+        return 2; // 默认 15
+    }
+
+    private int colorIndex(int argb) {
+        if (argb == Ui.COLOR_FOLLOW_THEME) return 0;
+        for (int i = 0; i < COLOR_VALUES.length; i++) {
+            if (COLOR_VALUES[i] == Ui.COLOR_FOLLOW_THEME) continue;
+            if (argb == getResources().getColor(COLOR_VALUES[i])) return i;
+        }
+        return 0;
     }
 
     private void addWeighted(LinearLayout row, Button... btns) {
@@ -398,6 +513,19 @@ public class SettingsActivity extends Activity {
         cfg.autoSend(cbAutoSend.isChecked());
         cfg.autoClose(cbAutoClose.isChecked());
         cfg.addNewline(cbNewline.isChecked());
+        // ---- 外观（均写入 SharedPreferences，App 关闭后依然保留）----
+        cfg.theme(Ui.THEME_VALUES[safePos(spTheme, 0)]);
+        int ci = safePos(spTextColor, 0);
+        cfg.textColor(ci > 0 ? getResources().getColor(COLOR_VALUES[ci]) : Ui.COLOR_FOLLOW_THEME);
+        cfg.fontFamily(Ui.FONT_VALUES[safePos(spFont, 0)]);
+        int si = safePos(spFontSize, 2);
+        cfg.fontSize(Ui.FONT_SIZES[si]);
+    }
+
+    private int safePos(Spinner s, int def) {
+        if (s == null) return def;
+        int p = s.getSelectedItemPosition();
+        return p < 0 ? def : p;
     }
 
     private void refresh() {

@@ -21,14 +21,33 @@ import android.widget.TextView;
  */
 public final class Ui {
 
+    /**
+     * 当前生效的主题。默认 dark。
+     * 用 Ui.setTheme() 设置后，下面的 bg()/surface()/text() 等 token 会取对应色板。
+     */
+    private static boolean light = false;
+
+    /** 切换主题：true=light，false=dark */
+    public static void setTheme(boolean lightTheme) { light = lightTheme; }
+
+    /** 便捷：按 Config 里的主题字符串设置 */
+    public static void setTheme(String name) { light = "light".equalsIgnoreCase(name); }
+
+    public static boolean isLight() { return light; }
+
+    private static int col(Context c, int darkRes, int lightRes) {
+        return c.getResources().getColor(light ? lightRes : darkRes);
+    }
+
     // ---- 颜色 token（对应 res/values/colors.xml）----
-    public static int bg(Context c)          { return c.getResources().getColor(R.color.kv_bg); }
-    public static int surface(Context c)      { return c.getResources().getColor(R.color.kv_surface); }
-    public static int surfaceHi(Context c)    { return c.getResources().getColor(R.color.kv_surface_hi); }
-    public static int border(Context c)       { return c.getResources().getColor(R.color.kv_border); }
-    public static int text(Context c)         { return c.getResources().getColor(R.color.kv_text); }
-    public static int text2(Context c)        { return c.getResources().getColor(R.color.kv_text2); }
-    public static int text3(Context c)        { return c.getResources().getColor(R.color.kv_text3); }
+    public static int bg(Context c)          { return col(c, R.color.kv_bg, R.color.kvl_bg); }
+    public static int surface(Context c)     { return col(c, R.color.kv_surface, R.color.kvl_surface); }
+    public static int surfaceHi(Context c)   { return col(c, R.color.kv_surface_hi, R.color.kvl_surface_hi); }
+    public static int border(Context c)      { return col(c, R.color.kv_border, R.color.kvl_border); }
+    public static int text(Context c)        { return col(c, R.color.kv_text, R.color.kvl_text); }
+    public static int text2(Context c)       { return col(c, R.color.kv_text2, R.color.kvl_text2); }
+    public static int text3(Context c)       { return col(c, R.color.kv_text3, R.color.kvl_text3); }
+    // 主色不随主题变化，保证品牌一致
     public static int primary(Context c)      { return c.getResources().getColor(R.color.kv_primary); }
     public static int primaryPress(Context c) { return c.getResources().getColor(R.color.kv_primary_press); }
     public static int primaryDim(Context c)   { return c.getResources().getColor(R.color.kv_primary_dim); }
@@ -165,6 +184,47 @@ public final class Ui {
         e.setMinHeight(dp(c, 44));
         return e;
     }
+
+    /**
+     * 应用输入框外观（颜色 / 字体 / 字号）。设置改动后调用，全部来自 Config 持久化值。
+     *
+     * @param cfg        Config 实例
+     * @param themeText  当前主题下「默认文字色」——用户选「跟随主题」时用它
+     */
+    public static void applyInputStyle(EditText e, Config cfg, int themeText) {
+        if (e == null || cfg == null) return;
+        int color = cfg.inputTextColor();
+        e.setTextColor(color == 0 ? themeText : color);
+        e.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, cfg.fontSize());
+        e.setTypeface(typeface(cfg.fontFamily()));
+    }
+
+    /** 字体族 -> Typeface */
+    public static android.graphics.Typeface typeface(String family) {
+        if (family == null) return android.graphics.Typeface.DEFAULT;
+        switch (family) {
+            case "serif":     return android.graphics.Typeface.SERIF;
+            case "monospace": return android.graphics.Typeface.MONOSPACE;
+            case "sans":      return android.graphics.Typeface.SANS_SERIF;
+            default:          return android.graphics.Typeface.DEFAULT;
+        }
+    }
+
+    /** 设置页用的字体可选项（顺序与 stored value 对应） */
+    public static final String[] FONT_LABELS   = {"无衬线（默认）", "衬线 Serif", "等宽 Monospace"};
+    public static final String[] FONT_VALUES   = {"sans", "serif", "monospace"};
+
+    /** 设置页字号可选项（sp） */
+    public static final int[]    FONT_SIZES    = {12, 14, 15, 16, 18, 20, 24, 28};
+    public static final String[] FONT_SIZE_TXT = {"极小 12", "小 14", "默认 15", "中大 16",
+                                                  "大 18", "特大 20", "巨大 24", "超大 28"};
+
+    /** 设置页主题可选项 */
+    public static final String[] THEME_LABELS  = {"深色（默认）", "浅色"};
+    public static final String[] THEME_VALUES  = {"dark", "light"};
+
+    /** 「跟随主题」在色板里用 0 表示 */
+    public static final int COLOR_FOLLOW_THEME = 0;
 
     public static Button primaryButton(Context c, String label) {
         Button b = new Button(c);
