@@ -38,6 +38,7 @@
             android:name=".SettingsActivity"
             android:exported="false"
             android:label="KeyVoice 设置"
+            android:screenOrientation="reversePortrait"
             android:windowSoftInputMode="adjustResize" />
 
         <activity
@@ -45,6 +46,7 @@
             android:excludeFromRecents="true"
             android:exported="false"
             android:launchMode="singleTop"
+            android:screenOrientation="reversePortrait"
             android:theme="@style/TranslucentTheme"
             android:windowSoftInputMode="stateVisible|adjustResize" />
 

@@ -67,6 +67,15 @@ public class MainActivity extends Activity {
     private boolean onboardWaitingReturn = false;
     private static final int REQ_ONBOARD_MIC = 200;
 
+    /**
+     * 当前处于 resumed（前台可见）状态的 MainActivity。
+     * 用于把后台服务（无障碍服务 / VoiceService）的提示改道到主页面的 overlay：
+     * Toast 是【系统窗口】，按设备物理方向渲染；而本页是 reversePortrait（旋转 180°），
+     * 倒持手机时 Toast 的文字方向会错、位置也会漂到边栏。overlay 属于本 Activity，
+     * 随 Activity 一起旋转，才是正确的位置与方向。
+     */
+    private static MainActivity resumed = null;
+
     private final Runnable autoSendTask = () -> doSend(false);
     private final Runnable hideTip = () -> { if (overlay != null) overlay.setVisibility(View.GONE); };
 
@@ -162,17 +171,18 @@ public class MainActivity extends Activity {
         arrow.setVisibility(View.GONE);
         inputWrap.addView(arrow);
 
-        // 救砖入口：长按输入框右下角状态点 → 清空异常布局存档，把三个按钮复位。
-        // 仅当按钮因历史存档坐标越界而整体不可见时使用。
+        // 救砖入口：长按输入框右下角状态点 → 报告三个按钮的真实几何（不依赖 adb），并提供一键复位。
+        // 这是为无法使用 adb 的场景准备的：几何值直接显示在屏幕上，可截屏反馈。
         statusDot.setOnLongClickListener(v -> {
             new AlertDialog.Builder(this)
-                    .setTitle("复位按钮布局")
-                    .setMessage("把「设置 / 模拟长按 / 电脑上屏」三个按钮恢复到默认位置？\n\n（用于按钮被拖到看不见的地方时的应急恢复）")
-                    .setPositiveButton("复位", (d, w) -> {
+                    .setTitle("按钮布局诊断")
+                    .setMessage("长按状态点触发的诊断报告（可直接截屏反馈）：\n\n"
+                            + side.reportGeometry())
+                    .setPositiveButton("复位按钮", (d, w) -> {
                         side.resetLayout();
                         showCenterTip("按钮布局已复位");
                     })
-                    .setNegativeButton("取消", null)
+                    .setNeutralButton("关闭", null)
                     .show();
             return true;
         });
@@ -290,10 +300,23 @@ public class MainActivity extends Activity {
 
     /** 居中短提示（约 800ms 后消失） */
     private void showCenterTip(String msg) {
+        if (tip == null || overlay == null) return;
         tip.setText(msg);
         overlay.setVisibility(View.VISIBLE);
         h.removeCallbacks(hideTip);
         h.postDelayed(hideTip, 800);
+    }
+
+    /**
+     * 供后台服务（KeyTriggerService / VoiceService）投递提示。
+     * 只有本页正处于前台时才显示到 overlay，否则交给 Trigger 回退成 Toast
+     * （锁屏/后台触发时仍要有可见反馈）。
+     */
+    static boolean postTip(String msg) {
+        MainActivity a = resumed;
+        if (a == null) return false;
+        a.runOnUiThread(() -> a.showCenterTip(msg));
+        return true;
     }
 
     /**
@@ -378,6 +401,13 @@ public class MainActivity extends Activity {
             lanAutoScanned = true;
             autoLanConnect();
         }
+        resumed = this;
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        if (resumed == this) resumed = null;
     }
 
     @Override

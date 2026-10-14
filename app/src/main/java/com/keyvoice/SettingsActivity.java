@@ -26,7 +26,6 @@ import android.widget.RadioGroup;
 import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.TextView;
-import android.widget.Toast;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -168,7 +167,15 @@ public class SettingsActivity extends Activity {
         bMic.setOnClickListener(v -> requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, 100));
         c7.addView(bMic);
         Button bSave = Ui.primaryButton(this, "保存设置");
-        bSave.setOnClickListener(v -> { save(); Toast.makeText(this, "已保存", Toast.LENGTH_SHORT).show(); });
+        // 不用 Toast：Toast 是系统窗口，在 reversePortrait 页面里文字方向会错。
+        // 直接用页内 tvInfo 提示，随 Activity 一起旋转，方向正确。
+        bSave.setOnClickListener(v -> {
+            save();
+            tvInfo.setText("已保存");
+            tvInfo.postDelayed(() -> {
+                if (tvInfo != null) tvInfo.setText("");
+            }, 1200);
+        });
         c7.addView(bSave);
         root.addView(c7);
 
