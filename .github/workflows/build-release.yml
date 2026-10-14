@@ -28,10 +28,14 @@ jobs:
           sudo apt-get install -y unzip curl
           SDK=$HOME/android-sdk
           mkdir -p $SDK/cmdline-tools
-          curl -sSL -o cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
-          unzip -q -o cmdline-tools.zip -d $SDK
-          mkdir -p $SDK/cmdline-tools/latest
-          mv $SDK/cmdline-tools/cmdline-tools $SDK/cmdline-tools/latest
+          echo "下载 commandline-tools (带重试) ..."
+          curl -fsSL --retry 6 --retry-delay 5 --connect-timeout 30 -o /tmp/ct.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          ls -l /tmp/ct.zip
+          test -s /tmp/ct.zip
+          rm -rf /tmp/ct && mkdir -p /tmp/ct
+          unzip -q -o /tmp/ct.zip -d /tmp/ct
+          ls /tmp/ct
+          mv /tmp/ct/cmdline-tools $SDK/cmdline-tools/latest
           echo "ANDROID_HOME=$SDK" >> $GITHUB_ENV
           echo "$SDK/cmdline-tools/latest/bin" >> $GITHUB_PATH
           yes | sdkmanager --licenses >/dev/null
