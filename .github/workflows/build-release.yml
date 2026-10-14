@@ -1,0 +1,67 @@
+name: Build & Release Debug APK
+
+on:
+  push:
+    branches: [fix/android13-startup-crash]
+  workflow_dispatch:
+
+# 允许工作流用 GITHUB_TOKEN 创建 release
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android SDK licenses
+        run: yes | sdkmanager --licenses || true
+
+      - name: Install required SDK packages
+        run: sdkmanager "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
+      - name: Build debug APK
+        run: ./gradlew assembleDebug --no-daemon
+
+      - name: Create GitHub Release with APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.1-android15-fix
+          name: v1.1-android15-fix — 修复 Android 13+ 启动即崩溃
+          body: |
+            ## 修复 Android 13+ 启动即崩溃
+
+            **问题**：在 Android 13 及以上（targetSdk 34）设备上，App 一打开就闪退（Activity 秒退）。
+
+            **原因**：`MainActivity` / `VoiceInputActivity` 动态注册应用内广播时未声明 `RECEIVER_NOT_EXPORTED` 标志。
+            Android 13（API 33）起系统强制要求该标志，缺省即抛 `IllegalArgumentException` 导致崩溃。
+            原作者在 Android 9（API 28）基线测试，故未暴露。
+
+            **修复**：注册时按 API 级别分支——
+            - Android 13+：使用三参数 `registerReceiver(..., Context.RECEIVER_NOT_EXPORTED)`
+            - Android 12 及以下：沿用原两参数写法（行为不变，Android 9 完全不受影响）
+
+            **附件**：`app-debug.apk`，可直接安装到 Android 9 ~ 15。
+
+            ### 使用提示
+            - 若锁屏/灭屏听写的「听写/停止」按钮不显示，请到系统设置给 KeyVoice 开启「通知」权限
+              （Manifest 仍缺 `POST_NOTIFICATIONS`，属体验项，非崩溃）。
+            - 小米/HyperOS、OPPO、vivo 等需在设置里给 KeyVoice 开启「自启动 / 允许后台运行 / 电池无限制」，
+              否则灭屏后前台服务易被回收。
+        files: app/build/outputs/apk/debug/app-debug.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
