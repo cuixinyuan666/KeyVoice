@@ -74,18 +74,10 @@ public class MainActivity extends Activity {
     private static final int TIP_TEXT_W_DP = 280;
     /** 局域网模式未连接时，最多自动搜索连接一次 */
     private boolean lanAutoScanned = false;
-    /** 模拟空格“松开”后置位：等讯飞出字后立即发送（优先于普通自动发送） */
-    private boolean commitWait = false;
     /** 暂停态：已暂时松开长按，等再次点击恢复 */
     private boolean paused = false;
-    /**
-     * 发送防抖（毫秒）。讯飞出字经常分多次提交：先提交半句，随后再提交带标点的整句修正。
-     * 原逻辑「COMMIT 后 700ms 就发 + 普通自动发送 1200ms」会让两次提交各自发出一条消息，
-     * 且第二条包含第一条的部分内容（用户报告的“一条语音被分成两条且内容重复”）。
-     * 现统一为：任何文字变化都重置同一个防抖计时器，静默期过后才发送，
-     * 发送内容取当时的完整文本 → 一次语音只发一条完整消息。
-     */
-    private static final long SEND_DEBOUNCE_MS = 1500L;
+    /** 最近一次成功发送的内容：用于兜底清空（讯飞延迟修正会把已发送内容写回输入框） */
+    private String lastSent = "";
 
     // ---------------------------------------------------------------- 输入框调节
     /** 输入框是否处于调节模式（长按 5 秒进入） */
@@ -117,7 +109,6 @@ public class MainActivity extends Activity {
      */
     private static MainActivity resumed = null;
 
-    private final Runnable autoSendTask = () -> doSend(false);
     private final Runnable hideTip = () -> { if (overlay != null) overlay.setVisibility(View.GONE); };
 
     private final BroadcastReceiver commit = new BroadcastReceiver() {
@@ -125,8 +116,7 @@ public class MainActivity extends Activity {
         public void onReceive(Context c, Intent i) {
             String t = et.getText() == null ? "" : et.getText().toString();
             if (t.trim().isEmpty()) {
-                commitWait = true;
-                showCenterTip("已松开，等识别出字后自动发送…");
+                showCenterTip("已松开，识别出字后点「电脑上屏」发送");
             } else {
                 doSend(true);
             }
@@ -147,6 +137,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        appCtx = getApplicationContext();
         cfg = new Config(this);
         // 方向：默认跟随系统，只有用户显式开启「倒置显示」时才锁定 reversePortrait
         applyOrientation();
@@ -416,17 +407,8 @@ public class MainActivity extends Activity {
             @Override public void onTextChanged(CharSequence s, int a, int b, int c) { }
 
             @Override public void afterTextChanged(Editable s) {
-                if (KeyTriggerService.holding) return;
-                if (fromPc) return;   // 电脑发来的消息回填输入框，不再自动回发到电脑
-                if (s == null || s.toString().trim().isEmpty()) return;
-                boolean releaseFlow = commitWait;   // 本次变化属于“松开长按后讯飞出字”流程
-                commitWait = false;
-                // 松开流程必发；普通输入尊重设置里的「自动发送」开关
-                if (!releaseFlow && !cfg.autoSend()) return;
-                // 统一防抖：每次文字变化都重置计时器，静默期后一次性发送完整文本
-                h.removeCallbacks(autoSendTask);
-                long wait = Math.max(cfg.idleMs(), SEND_DEBOUNCE_MS);
-                h.postDelayed(autoSendTask, wait);
+                // 自动发送已取消：识别出的文字只落在输入框，
+                // 由用户点「电脑上屏」按钮手动发送
             }
         });
 
@@ -456,24 +438,28 @@ public class MainActivity extends Activity {
         showCenterTip("已收到电脑消息（已入框+存剪贴板）");
     }
 
-    /** 供 LanServer 投递：页面在前台才处理；不在前台时记日志并丢弃 */
+    /** 页面不在前台时暂存的电脑消息：回到主页面立即入框（修复“电脑发消息显示失败”） */
+    private static volatile String pendingPcMessage = null;
+    /** 应用级 Context：供后台线程弹 Toast 用 */
+    private static android.content.Context appCtx;
+
+    /** 供 LanServer 投递：前台直接处理；不在前台则暂存 + Toast 提示（此 ROM 吞 logcat，必须有可见反馈） */
     static boolean postPcMessage(String text) {
         MainActivity a = resumed;
-        if (a == null) {
-            android.util.Log.w("KeyVoiceMsg", "page not resumed, drop pc message: " + text);
-            return false;
+        if (a != null) {
+            a.runOnUiThread(() -> a.handlePcMessage(text));
+            return true;
         }
-        a.runOnUiThread(() -> a.handlePcMessage(text));
-        return true;
+        pendingPcMessage = text;
+        return false;
     }
 
-    /** 居中短提示（约 800ms 后消失） */
+    /**
+     * 居中短提示 —— 已按需求【取消所有弹窗提示】（含“等待输入法弹出…”等）。
+     * 保留方法签名以兼容全部调用点，方法体静默：不再显示任何提示条。
+     */
     private void showCenterTip(String msg) {
-        if (tip == null || overlay == null) return;
-        tip.setText(verticalize(msg));
-        overlay.setVisibility(View.VISIBLE);
-        h.removeCallbacks(hideTip);
-        h.postDelayed(hideTip, 800);
+        // 弹窗提示已全部取消：静默处理
     }
 
     /**
@@ -839,15 +825,25 @@ public class MainActivity extends Activity {
 
         sending = true;
         setHoldActive(false);
-        commitWait = false;
         paused = false;
         updatePauseIcon();
-        h.removeCallbacks(autoSendTask);
+        lastSent = text;
         String finalText = text;
         Sender.send(this, text, (ok, msg) -> {
             sending = false;
             if (ok) {
+                // 发送成功立即清空输入框。注意：讯飞松开后的“整句修正”可能在 1~2 秒后
+                // 才提交，把刚发送的内容重新写回框里（看起来像“没清空”）——
+                // 所以延迟检查：若框内仍是刚发送的内容（被输入法写回），再清一次；
+                // 若用户已输入新内容则不动。
                 et.setText("");
+                et.clearFocus();
+                h.postDelayed(() -> {
+                    if (et != null && et.getText() != null
+                            && et.getText().toString().trim().equals(lastSent.trim())) {
+                        et.setText("");
+                    }
+                }, 1800);
                 showCenterTip("已发送：" + finalText);
             } else {
                 // 发送失败也要执行松开长按的逻辑，否则长按残留会让讯飞一直处于录音态
@@ -878,6 +874,12 @@ public class MainActivity extends Activity {
             autoLanConnect();
         }
         resumed = this;
+        // 回到主页面：补投暂存的电脑消息
+        if (pendingPcMessage != null) {
+            String t = pendingPcMessage;
+            pendingPcMessage = null;
+            handlePcMessage(t);
+        }
     }
 
     @Override
@@ -1013,7 +1015,6 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
-        h.removeCallbacks(autoSendTask);
         h.removeCallbacks(hideTip);
         try { unregisterReceiver(commit); } catch (Exception ignored) { }
         try { unregisterReceiver(result); } catch (Exception ignored) { }

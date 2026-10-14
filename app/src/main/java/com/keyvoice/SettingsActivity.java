@@ -46,7 +46,7 @@ public class SettingsActivity extends Activity {
     private Spinner spTheme, spTextColor, spFont, spFontSize;
     private RadioGroup rgMode, rgTrans;
     private Button btnScan;
-    private CheckBox cbAutoSend, cbAutoClose, cbNewline;
+    private CheckBox cbAutoClose, cbNewline;
     private CheckBox cbResident, cbContinuous, cbMedia, cbVibrate, cbAutoStart;
     private CheckBox cbKeepScreen;
     private CheckBox cbInvert;
@@ -57,10 +57,10 @@ public class SettingsActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        // 方向跟随配置：默认跟随系统，避免倒置手机时系统返回/Home 被搬到顶部
+        // 方向：只允许竖屏/翻转竖屏，永不横屏（与主页面一致）
         setRequestedOrientation(new Config(this).invertMode()
                 ? android.content.pm.ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT
-                : android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+                : android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
         cfg = new Config(this);
 
         ScrollView sv = new ScrollView(this);
@@ -169,7 +169,7 @@ public class SettingsActivity extends Activity {
         // ---- 其它 ----
         LinearLayout c7 = Ui.sectionCard(this);
         c7.addView(Ui.sectionTitle(this, "其它"));
-        cbAutoSend = check("识别服务模式：出字后自动发送（关掉则手动点「电脑上屏」）；输入法模式由「电脑上屏」按钮负责松开并发送", cfg.autoSend()); c7.addView(cbAutoSend);
+        c7.addView(Ui.body(this, "发送方式：识别出的文字只落在主页面输入框，由你点「电脑上屏」手动发送。"));
         cbAutoClose = check("发送成功后自动关闭听写窗口", cfg.autoClose()); c7.addView(cbAutoClose);
         cbNewline = check("文字末尾追加回车", cfg.addNewline()); c7.addView(cbNewline);
         Button bMic = Ui.ghostButton(this, "授予麦克风权限（识别服务模式需要）");
@@ -531,7 +531,6 @@ public class SettingsActivity extends Activity {
         cfg.vibrate(cbVibrate.isChecked());
         cfg.autoStart(cbAutoStart.isChecked());
         cfg.keepScreen(cbKeepScreen.isChecked());
-        cfg.autoSend(cbAutoSend.isChecked());
         cfg.autoClose(cbAutoClose.isChecked());
         cfg.addNewline(cbNewline.isChecked());
         // ---- 外观（均写入 SharedPreferences，App 关闭后依然保留）----

@@ -25,7 +25,8 @@ import java.nio.charset.StandardCharsets;
 public final class LanServer {
 
     public interface Listener {
-        void onMessage(String text);
+        /** @return true=已投递到前台主页面；false=页面不在前台已暂存 */
+        boolean onMessage(String text);
     }
 
     public static final int PORT = 17892;
@@ -104,10 +105,13 @@ public final class LanServer {
             if (isPost) {
                 String text = extractText(body);
                 Log.i(TAG, "extracted text=" + text);
+                boolean delivered = false;
                 if (!text.isEmpty()) {
                     Listener l = listener;
-                    if (l != null) l.onMessage(text);
+                    if (l != null) delivered = l.onMessage(text);
                 }
+                // 投递结果直接写进响应：ROM 吞应用日志时，电脑端也能知道送达情况
+                resp = "{\"ok\":true,\"delivered\":" + delivered + "}";
             } else if (isPing) {
                 resp = "{\"ok\":true,\"service\":\"keyvoice-phone\"}";
             }
