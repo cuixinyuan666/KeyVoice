@@ -512,6 +512,7 @@ public class MainActivity extends Activity {
                 inputWrap.setTranslationY(inputWrap.getTranslationY() + (ev.getRawY() - inputLastY));
                 inputLastX = ev.getRawX();
                 inputLastY = ev.getRawY();
+                clampInputTranslation();   // 拖动中也钳制，保证永远拖不出屏幕
                 break;
             case MotionEvent.ACTION_UP:
             case MotionEvent.ACTION_CANCEL:
@@ -573,13 +574,46 @@ public class MainActivity extends Activity {
     /** 恢复输入框的位移/缩放/颠倒（来自持久化配置） */
     private void applyInputLayout() {
         if (inputWrap == null || cfg == null) return;
-        inputWrap.setTranslationX(cfg.inputTx());
-        inputWrap.setTranslationY(cfg.inputTy());
+        float tx = cfg.inputTx(), ty = cfg.inputTy();
+        // 历史脏存档修复：v0.3.9 的拖动 bug 曾把【离屏位移】（如 ty=2149，屏幕高才 2340）
+        // 写进 SharedPreferences。合法存档只会来自钳制后的拖动（恒在 [0, max] 内），
+        // 所以超出范围的值必然是脏数据 → 直接归零回到原始位置（而不是钳到屏幕边缘）。
+        ViewGroup p = (ViewGroup) inputWrap.getParent();
+        if (p != null && p.getWidth() > 0 && p.getHeight() > 0
+                && inputWrap.getWidth() > 0 && inputWrap.getHeight() > 0) {
+            float maxX = Math.max(0f, p.getWidth() - inputWrap.getWidth());
+            float maxY = Math.max(0f, p.getHeight() - inputWrap.getHeight());
+            if (tx < 0f || tx > maxX) tx = 0f;
+            if (ty < 0f || ty > maxY) ty = 0f;
+        }
+        inputWrap.setTranslationX(tx);
+        inputWrap.setTranslationY(ty);
         float s = cfg.inputScale();
         if (s < INPUT_SCALE_MIN || s > INPUT_SCALE_MAX) s = 1f;
         inputWrap.setScaleX(s);
         inputWrap.setScaleY(s);
         inputWrap.setRotation(cfg.inputFlip() ? 180f : 0f);
+        clampInputTranslation();
+    }
+
+    /**
+     * 把输入框的位移钳制在父容器范围内，保证任何时候都完整可见。
+     * <p>
+     * 背景：v0.3.9 的拖动瞬移 bug 曾把【离屏的位移值】（ty=2149，屏幕高才 2340）
+     * 持久化进了 SharedPreferences，之后每次启动 applyInputLayout() 都原样恢复，
+     * 输入框就一直“消失”在屏幕外。这里在恢复与拖动两个入口统一钳制：
+     * 既挡住历史脏存档，也保证全屏拖动时永远拖不出去（仍可在屏幕内任意位置）。
+     */
+    private void clampInputTranslation() {
+        if (inputWrap == null) return;
+        ViewGroup p = (ViewGroup) inputWrap.getParent();
+        if (p == null || p.getWidth() <= 0 || p.getHeight() <= 0) return;
+        int w = inputWrap.getWidth(), hgt = inputWrap.getHeight();
+        if (w <= 0 || hgt <= 0) return;
+        float maxX = Math.max(0f, p.getWidth() - w);
+        float maxY = Math.max(0f, p.getHeight() - hgt);
+        inputWrap.setTranslationX(clamp(inputWrap.getTranslationX(), 0f, maxX));
+        inputWrap.setTranslationY(clamp(inputWrap.getTranslationY(), 0f, maxY));
     }
 
     /** 调节面板上的小按钮，外观与主页面圆形按钮体系一致 */
