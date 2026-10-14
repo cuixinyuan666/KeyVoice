@@ -110,8 +110,16 @@ public class VoiceInputActivity extends Activity {
             }
         });
 
-        registerReceiver(commit, new IntentFilter("com.keyvoice.COMMIT"));
-        registerReceiver(result, new IntentFilter(VoiceService.ACTION_RESULT));
+        // Android 13+（targetSdk≥33）强制要求显式声明广播导出标志，否则注册即抛
+        // IllegalArgumentException 导致 Activity 秒退。这两个广播均为应用内部通信
+        // （发送方已 setPackage(本应用)），故用 RECEIVER_NOT_EXPORTED。
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(commit, new IntentFilter("com.keyvoice.COMMIT"), Context.RECEIVER_NOT_EXPORTED);
+            registerReceiver(result, new IntentFilter(VoiceService.ACTION_RESULT), Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(commit, new IntentFilter("com.keyvoice.COMMIT"));
+            registerReceiver(result, new IntentFilter(VoiceService.ACTION_RESULT));
+        }
 
         if ("sr".equals(cfg.mode())) {
             // 交给识别服务，自己只做展示（结果通过广播回来）
