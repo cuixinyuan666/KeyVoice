@@ -33,21 +33,11 @@ public class Trigger {
     }
 
     /**
-     * 统一提示入口。
-     *
-     * 优先投递到主页面 overlay（属于 reversePortrait 的 Activity，随 Activity 旋转，
-     * 文字方向与位置都正确）；只有主页面不在前台时才回退成 Toast。
-     *
-     * 背景：直接用 {@code Toast.makeText(getApplicationContext(), ...)} 弹的是
-     * 【系统窗口】，按设备物理方向渲染。主页面是 reversePortrait（旋转 180°），
-     * 倒持手机时 Toast 会表现为文字方向错误、位置漂到侧边，因此 App 内提示
-     * 一律走 Activity 的 overlay。
+     * 统一提示入口 —— 已按需求【取消所有弹窗提示】。
+     * 全部静默处理：不投页面提示条、不弹系统 Toast。
+     * 保留方法签名，各调用点无需改动。
      */
     public static void toast(Context c, String s) {
-        if (MainActivity.postTip(s)) return;
-        try {
-            Toast.makeText(c.getApplicationContext(), s, Toast.LENGTH_SHORT).show();
-        } catch (Exception ignored) {
-        }
+        // 弹窗提示已全部取消：静默处理
     }
 }

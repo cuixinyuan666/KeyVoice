@@ -77,6 +77,13 @@ class INPUT(ctypes.Structure):
     _fields_ = [("type", ctypes.c_ulong), ("ki", KEYBDINPUT), ("pad", ctypes.c_ubyte * 8)]
 
 u32.GetGUIThreadInfo.argtypes = [ctypes.c_ulong, ctypes.POINTER(GUITHREADINFO)]
+
+class POINT(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+u32.GetCursorPos.argtypes = [ctypes.POINTER(POINT)]
+u32.GetCursorPos.restype = ctypes.c_int
+
 u32.SendInput.argtypes = [ctypes.c_uint, ctypes.POINTER(INPUT), ctypes.c_int]
 u32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
 u32.SetClipboardData.restype = ctypes.c_void_p
@@ -286,6 +293,8 @@ class Box:
         root.resizable(True, True)
         sw = root.winfo_screenwidth()
         root.geometry("%dx420+%d+40" % (min(420, sw - 40), sw - min(420, sw - 40) - 20))
+        # 限制最小尺寸：防止缩得太小时消息列表被挤没（贴顶收起时会临时解除）
+        root.minsize(300, 240)
         root.configure(bg=BG)
         try:
             root.wm_attributes("-toolwindow", True)   # 不在任务栏占大块
@@ -326,7 +335,10 @@ class Box:
                                    command=self.canvas.yview, bg=SURFACE_HI,
                                    troughcolor=BG, width=10)
         self.list_inner = tk.Frame(self.canvas, bg=BG)
-        self.canvas.create_window((0, 0), window=self.list_inner, anchor="nw")
+        self.canvas_win = self.canvas.create_window((0, 0), window=self.list_inner, anchor="nw")
+        # 让内层 Frame 宽度始终撑满画布 → 消息行充满整个窗口宽度（否则只是内容宽的一块）
+        self.canvas.bind("<Configure>",
+                         lambda e: self.canvas.itemconfigure(self.canvas_win, width=e.width))
         self.canvas.configure(yscrollcommand=self.scroll.set)
         self.canvas.pack(side="left", fill="both", expand=True, padx=(0, 0))
         self.scroll.pack(side="right", fill="y")
@@ -362,6 +374,16 @@ class Box:
         self._start_focus_tracker()
         self.update_status()
         self._reset_idle()
+
+        # 贴顶态辅助：量出系统标题栏高度 / 预览条 / 悬停展开
+        root.update_idletasks()
+        self.titlebar_h = max(24, root.winfo_rooty() - root.winfo_y())
+        self._hover_inside = False
+        self._peeking = False
+        self.peek_label = tk.Label(root, bg=SUCCESS, fg="#062B12",
+                                   font=("Microsoft YaHei", 10, "bold"),
+                                   anchor="w", padx=10, pady=5)
+        self._poll_hover()
 
     # ----------------------------------------------------------- UI 小工具
     @staticmethod
@@ -431,10 +453,11 @@ class Box:
         self.scroll_to_bottom()
         self.update_status()
 
-        # 收到消息：若已收起则展开，并绿闪一下
+        # 贴顶态：动态预览特效（绿色预览条展开→自动收回）；展开态：绿闪条
         if self.docked:
-            self.undock()
-        self.flash_green()
+            self._peek(text)
+        else:
+            self.flash_green()
 
         ok = set_clipboard(text)
         if not ok:
@@ -450,12 +473,13 @@ class Box:
         row = tk.Frame(self.list_inner, bg=SURFACE,
                        highlightbackground=BORDER, highlightthickness=1)
         row.pack(fill="x", padx=8, pady=4)
+        btns = tk.Frame(row, bg=SURFACE)
+        # 【先 pack 右侧按钮】再 pack 文字：否则窗口变窄时按钮会被 expand 的文字挤没
+        btns.pack(side="right", padx=4, pady=4)
         label = tk.Label(row, text=msg["text"], bg=SURFACE, fg=TEXT,
                          font=FONT_SM, anchor="w", justify="left",
                          wraplength=300, cursor="hand2")
         label.pack(side="left", fill="both", expand=True, padx=8, pady=8)
-        btns = tk.Frame(row, bg=SURFACE)
-        btns.pack(side="right", padx=4, pady=4)
         b_copy = tk.Button(btns, text="复制", command=lambda m=msg: self._copy_msg(m),
                            bg=SURFACE_HI, fg=TEXT, activebackground=PRIMARY_PRESS,
                            activeforeground="#FFFFFF", font=FONT_SM, borderwidth=0,
@@ -586,7 +610,7 @@ class Box:
 
         def work():
             ok, msg = self._post_to_phone(text)
-            self.root.after(0, lambda: self.toast("已发送到手机" if ok else "发送失败：" + msg))
+            self.root.after(0, lambda: self.toast(msg if ok else "发送失败：" + msg))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -605,8 +629,11 @@ class Box:
                 req = urllib.request.Request(
                     url, data=body,
                     headers={"Content-Type": "application/json; charset=utf-8"})
-                urllib.request.urlopen(req, timeout=2.5)
-                return True, url
+                r = urllib.request.urlopen(req, timeout=2.5)
+                data = json.loads(r.read().decode("utf-8"))
+                if data.get("delivered"):
+                    return True, "已送达手机输入框"
+                return True, "已发到手机（主页面不在前台，回主界面自动显示）"
             except Exception as e:
                 last = str(e)
         return False, last
@@ -633,53 +660,94 @@ class Box:
             self.dock()
 
     def dock(self):
-        """收起贴顶：只保留 KeyVoice 标题栏，右侧显示当前时间。
-        横栏与展开态大小/位置完全统一（同 x、同宽、同高）；点击横栏即可展开。"""
+        """收起贴顶：只保留系统原生标题栏（带最小化/关闭按钮的那一栏），
+        当前时间并入标题文字；鼠标悬停在标题栏上自动展开。"""
         if self.docked:
             return
         self.normal_geom = self.root.geometry()
         x = self.root.winfo_x()
         w = self.root.winfo_width()
-        # 只留标题 + 右侧时间，其余部件全部隐藏
-        for wid in (self.status_canvas, self.status_label, self.status_spacer,
-                    self.btn_top, self.btn_dock, self.close_btn):
-            wid.pack_forget()
+        self.root.minsize(0, 0)               # 临时解除最小高度限制，允许只留标题栏
+        self.hdr.pack_forget()                # 隐藏自定义标题行，只留系统标题栏
         self.list_frame.pack_forget()
         self.input_frame.pack_forget()
-        self.flash_bar.configure(height=0)   # 收起时隐藏绿闪条，避免额外高度
-        self.clock.pack(side="right", padx=10)
-        hh = self.hdr.winfo_height() or 38
-        self.root.geometry("%dx%d+%d+0" % (max(w, 220), hh, max(0, x)))
+        self.flash_bar.configure(height=0)    # 收起时隐藏绿闪条
+        self.root.geometry("%dx%d+%d+0" % (max(w, 220), self.titlebar_h, max(0, x)))
         self.docked = True
+        self.root.title("KeyVoice · " + time.strftime("%H:%M:%S"))
 
     def undock(self):
-        """从贴顶状态恢复成正常窗口（横栏回到与展开态一致的位置和大小）。"""
+        """从贴顶状态恢复成正常窗口（标题行、列表、输入框全部回来）。"""
         if not self.docked:
             return
         if self.normal_geom:
             self.root.geometry(self.normal_geom)
+        self.root.minsize(300, 240)           # 恢复最小尺寸限制
+        self.root.title("KeyVoice")
         self.flash_bar.configure(height=3)
-        self.clock.pack_forget()
-        self._pack_header()   # 按正确顺序恢复顶栏所有部件
+        self.hdr.pack(fill="x")               # 子部件从未拆散，重排整个标题行即可
         self.list_frame.pack(fill="both", expand=True, padx=0, pady=0)
         self.input_frame.pack(fill="x")
         self.docked = False
+        self.btn_dock.configure(text="收起")
         self.scroll_to_bottom()
         self._reset_idle()
 
     def _hdr_click(self, *a):
-        """贴顶状态下点击横栏任意位置 → 展开。"""
+        """贴顶状态下点击横栏任意位置 → 展开（悬停展开为主，此处兜底）。"""
         if self.docked:
             self.undock()
 
+    def _poll_hover(self):
+        """贴顶时鼠标悬停在系统标题栏上 → 自动展开（无需点击）。"""
+        try:
+            if self.docked and not self._peeking:
+                pt = POINT()
+                u32.GetCursorPos(ctypes.byref(pt))
+                x = self.root.winfo_x()
+                y = self.root.winfo_y()
+                w = self.root.winfo_width()
+                h = self.titlebar_h
+                inside = (x <= pt.x <= x + w and y - 2 <= pt.y <= y + h + 8)
+                # 只在“从外面进入”的边沿触发，避免收起瞬间又立刻展开
+                if inside and not self._hover_inside:
+                    self.undock()
+                self._hover_inside = inside
+        except Exception:
+            pass
+        self.root.after(150, self._poll_hover)
+
     def _tick_clock(self):
-        """贴顶横栏右侧的时钟（每秒刷新）。"""
+        """贴顶时把当前时间并入系统标题栏文字（每秒刷新）。"""
         try:
             if self.docked:
-                self.clock.configure(text=time.strftime("%H:%M:%S"))
+                self.root.title("KeyVoice · " + time.strftime("%H:%M:%S"))
         except Exception:
             pass
         self.root.after(1000, self._tick_clock)
+
+    # ------------------------------------------------------ 贴顶来消息特效
+    def _peek(self, text):
+        """贴顶时来消息：标题栏下方展开一条绿色预览条（动态特效），2.5 秒后自动收回。
+        期间鼠标悬停仍可立即展开完整窗口。"""
+        self._peeking = True
+        self.flash_bar.configure(height=4, bg=SUCCESS)
+        self.peek_label.configure(text="📩 " + (text[:36] + "…" if len(text) > 36 else text))
+        self.peek_label.pack(fill="x")
+        hh = self.titlebar_h + 4 + self.peek_label.winfo_reqheight()
+        self.root.geometry("%dx%d+%d+0" % (self.root.winfo_width(), hh, self.root.winfo_x()))
+        self.root.after(2500, self._peek_hide)
+
+    def _peek_hide(self):
+        self._peeking = False
+        try:
+            self.peek_label.pack_forget()
+        except Exception:
+            pass
+        self.flash_bar.configure(height=0, bg=BORDER)
+        if self.docked:
+            self.root.geometry("%dx%d+%d+0" % (self.root.winfo_width(), self.titlebar_h,
+                                               self.root.winfo_x()))
 
     # ----------------------------------------------------------- 空闲计时
     def _activity(self, *a):
