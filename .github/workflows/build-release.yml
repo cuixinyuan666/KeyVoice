@@ -1,11 +1,9 @@
-name: Build and Release Debug APK
-
+name: Build and Release signed APK
 on:
   push:
-    branches: [fix/android13-startup-crash]
+    branches: [ fix/android13-startup-crash ]
   workflow_dispatch:
 
-# 允许工作流用 GITHUB_TOKEN 创建 release
 permissions:
   contents: write
 
@@ -23,51 +21,50 @@ jobs:
           java-version: '17'
 
       - name: Setup Android SDK
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
-          export ANDROID_HOME=$HOME/android-sdk
-          mkdir -p "$ANDROID_HOME/cmdline-tools"
-          curl -sSL -o cmdtools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
-          unzip -q cmdtools.zip -d "$ANDROID_HOME/cmdline-tools"
-          mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
-          rm -f cmdtools.zip
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
-          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
-          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
-          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
-          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          sudo apt-get update -y
+          sudo apt-get install -y unzip curl
+          SDK=$HOME/android-sdk
+          mkdir -p $SDK/cmdline-tools
+          curl -sSL -o cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          unzip -q -o cmdline-tools.zip -d $SDK
+          mkdir -p $SDK/cmdline-tools/latest
+          mv $SDK/cmdline-tools/cmdline-tools $SDK/cmdline-tools/latest
+          echo "ANDROID_HOME=$SDK" >> $GITHUB_ENV
+          echo "$SDK/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Decode keystore and write keystore.properties
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > keyvoice.jks
+          { echo "storeFile=keyvoice.jks"; echo "storePassword=${{ secrets.KEYSTORE_PASSWORD }}"; echo "keyAlias=${{ secrets.KEY_ALIAS }}"; echo "keyPassword=${{ secrets.KEY_PASSWORD }}"; } > keystore.properties
+          ls -l keyvoice.jks keystore.properties
 
       - name: Make gradlew executable
-        run: chmod +x gradlew
+        run: chmod +x ./gradlew
 
-      - name: Build debug APK
-        run: ./gradlew assembleDebug --no-daemon
+      - name: Build release APK
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: Verify APK signature
+        run: |
+          jarsigner -verify -verbose app/build/outputs/apk/release/app-release.apk 2>&1 | tail -8
+          test -f app/build/outputs/apk/release/app-release.apk
 
       - name: Create GitHub Release with APK
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v1.1-android15-fix
-          name: v1.1-android15-fix - 修复 Android 13+ 启动即崩溃
+          name: v1.1-android15-fix - 修复 Android 13+ 启动即崩溃 (已签名)
           body: |
-            ## 修复 Android 13+ 启动即崩溃
+            ## 修复内容
+            - 修复 Android 13+（含 Android 15）启动即崩溃：动态注册广播缺少 RECEIVER_NOT_EXPORTED 标志
+            - 使用发布密钥重新签名，可直接安装
 
-            **问题**：在 Android 13 及以上（targetSdk 34）设备上，App 一打开就闪退（Activity 秒退）。
-
-            **原因**：`MainActivity` / `VoiceInputActivity` 动态注册应用内广播时未声明 `RECEIVER_NOT_EXPORTED` 标志。
-            Android 13（API 33）起系统强制要求该标志，缺省即抛 `IllegalArgumentException` 导致崩溃。
-            原作者在 Android 9（API 28）基线测试，故未暴露。
-
-            **修复**：注册时按 API 级别分支——
-            - Android 13+：使用三参数 `registerReceiver(..., Context.RECEIVER_NOT_EXPORTED)`
-            - Android 12 及以下：沿用原两参数写法（行为不变，Android 9 完全不受影响）
-
-            **附件**：`app-debug.apk`，可直接安装到 Android 9 ~ 15。
-
-            ### 使用提示
-            - 若锁屏/灭屏听写的「听写/停止」按钮不显示，请到系统设置给 KeyVoice 开启「通知」权限
-              （Manifest 仍缺 `POST_NOTIFICATIONS`，属体验项，非崩溃）。
-            - 小米/HyperOS、OPPO、vivo 等需在设置里给 KeyVoice 开启「自启动 / 允许后台运行 / 电池无限制」，
-              否则灭屏后前台服务易被回收。
-          files: app/build/outputs/apk/debug/app-debug.apk
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            ## 安装注意
+            - 若手机已安装旧版 KeyVoice（作者原签名），请先 **卸载旧版** 再安装本包（签名不同）
+            - 魅族 / Flyme：设置 → 应用管理 → 允许「未知来源」安装
+          files: app/build/outputs/apk/release/app-release.apk
