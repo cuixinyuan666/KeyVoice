@@ -207,4 +207,15 @@ public class Config {
     /** 聊天面板是否上下颠倒（旋转 180°） */
     public boolean chatFlip() { return sp.getBoolean("chat_flip", false); }
     public void chatFlip(boolean v) { sp.edit().putBoolean("chat_flip", v).apply(); }
+    public boolean chatCollapsed() { return sp.getBoolean("chat_collapsed", false); }
+    public void chatCollapsed(boolean v) { sp.edit().putBoolean("chat_collapsed", v).apply(); }
+
+    /** 跨页面「恢复默认布局」请求标记：设置页点按钮后置位，主页面 onResume 时消费 */
+    public boolean layoutResetRequested() { return sp.getBoolean("layout_reset_req", false); }
+    public void layoutResetRequested(boolean v) { sp.edit().putBoolean("layout_reset_req", v).apply(); }
+
+    // ---------------------------------------------------------------- 本机名称
+    /** 本机显示名（显示在对方聊天面板里），默认机型名 Build.MODEL */
+    public String deviceName() { return sp.getString("device_name", android.os.Build.MODEL); }
+    public void deviceName(String v) { sp.edit().putString("device_name", v == null ? "" : v).apply(); }
 }

@@ -31,6 +31,7 @@ public class DragLayout extends RelativeLayout {
     {
         KEYS.add("s"); KEYS.add("h"); KEYS.add("e");
         KEYS.add("c"); KEYS.add("p");
+        KEYS.add("m");   // 消息框开关按钮（实体按钮：点一下直接显示消息框）
     }
 
     private boolean editMode = false;
@@ -380,8 +381,8 @@ public class DragLayout extends RelativeLayout {
 
         int bs = Ui.dp(getContext(), 38);
         int gap = Ui.dp(getContext(), 16);
-        // 五个按钮默认布局：s 右中，其余依次向下排列
-        String[] chain = {"s", "h", "e", "c", "p"};
+        // 六个按钮默认布局：s 右中，其余依次向下排列（m = 消息框开关，排在最后）
+        String[] chain = {"s", "h", "e", "c", "p", "m"};
         String prev = null;
         for (String key : chain) {
             boolean first = prev == null;

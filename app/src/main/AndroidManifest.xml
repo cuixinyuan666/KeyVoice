@@ -27,7 +27,10 @@
             android:exported="true"
             android:launchMode="singleTop"
             android:screenOrientation="portrait"
-            android:windowSoftInputMode="adjustResize">
+            android:windowSoftInputMode="adjustNothing">
+            <!-- adjustNothing：输入法弹出时【窗口不做任何缩放/平移】。
+                 之前用 adjustResize 会让窗口变矮，右侧按钮层跟着被压缩重排
+                 （实测按钮整体上移 360px、位置漂移），用户要求按钮位置绝对固定。 -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

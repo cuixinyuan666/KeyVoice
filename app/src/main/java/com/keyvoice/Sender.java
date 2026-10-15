@@ -44,6 +44,7 @@ public class Sender {
 
                 String body = "{\"text\":" + json(text)
                         + ",\"action\":\"" + action + "\""
+                        + ",\"from\":" + json(cfg.deviceName())
                         + ",\"ts\":" + System.currentTimeMillis() + "}";
                 byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
                 conn.setFixedLengthStreamingMode(bytes.length);

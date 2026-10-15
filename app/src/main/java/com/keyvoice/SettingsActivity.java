@@ -40,7 +40,7 @@ import java.util.List;
 public class SettingsActivity extends Activity {
 
     private Config cfg;
-    private EditText etHost, etPort;
+    private EditText etHost, etPort, etName;
     private TextView tvInfo, tvAdbHint;
     private Spinner spEngine, spAction;
     private Spinner spTheme, spTextColor, spFont, spFontSize;
@@ -107,6 +107,16 @@ public class SettingsActivity extends Activity {
         addWeighted(row1, btnScan, bTest);
         c2.addView(row1);
         root.addView(c2);
+
+        // ---- 本机名称（显示在对方聊天面板里，便于区分多台设备）----
+        LinearLayout cName = Ui.sectionCard(this);
+        cName.addView(Ui.sectionTitle(this, "本机名称（显示在对方聊天里）"));
+        etName = Ui.inputField(this, "如 手机A / 我的vivo（默认用机型名）");
+        etName.setText(cfg.deviceName());
+        etName.setSingleLine(true);
+        cName.addView(etName);
+        cName.addView(Ui.caption(this, "两台手机互发消息时，对方聊天里会显示这个名字来标识发送方。"));
+        root.addView(cName);
 
         // ---- 语音来源 ----
         LinearLayout c3 = Ui.sectionCard(this);
@@ -268,6 +278,20 @@ public class SettingsActivity extends Activity {
         });
         c9.addView(cbInvert);
         root.addView(c9);
+
+        // ---- 界面布局复位 ----
+        LinearLayout c10 = Ui.sectionCard(this);
+        c10.addView(Ui.sectionTitle(this, "界面布局"));
+        Button bResetLayout = Ui.primaryButton(this, "恢复默认布局（输入框/面板/按钮）");
+        bResetLayout.setOnClickListener(v -> {
+            MainActivity.requestResetLayout();        // 主页面在前台时直接执行
+            cfg.layoutResetRequested(true);           // 否则回到主页面 onResume 时执行
+            tvInfo.setText("已请求恢复默认布局，回到主页面查看");
+            tvInfo.postDelayed(() -> { if (tvInfo != null) tvInfo.setText(""); }, 1800);
+        });
+        c10.addView(bResetLayout);
+        c10.addView(Ui.caption(this, "把输入框、聊天面板和五个按钮一键复位到初始位置/大小/方向。需主页面在前台或返回主页面后生效。"));
+        root.addView(c10);
 
         tvInfo = Ui.caption(this, "");
         root.addView(tvInfo);
@@ -518,6 +542,7 @@ public class SettingsActivity extends Activity {
     private void save() {
         cfg.adbMode(rgTrans.getCheckedRadioButtonId() == 10);
         cfg.host(etHost.getText().toString().trim());
+        cfg.deviceName(etName.getText().toString().trim());
         try {
             cfg.port(Integer.parseInt(etPort.getText().toString().trim()));
         } catch (Exception ignored) { }

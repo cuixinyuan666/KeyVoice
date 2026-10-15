@@ -2,6 +2,6 @@
 <!-- 调节把手：一条圆角短横杠，视觉上是“可拖拽/可点按”的把手 -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android"
     android:shape="rectangle">
-    <solid android:color="#B3FFFFFF" />
+    <solid android:color="#F2FFFFFF" />
     <corners android:radius="3dp" />
 </shape>

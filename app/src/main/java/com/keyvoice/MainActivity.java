@@ -15,6 +15,7 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 import android.os.PowerManager;
 import android.provider.Settings;
 import android.text.Editable;
@@ -48,6 +49,7 @@ public class MainActivity extends Activity {
     private ImageButton btnHold, btnSend, btnSettings, btnClear, btnPause;
     private DragLayout side;
     private FrameLayout overlay;
+    private FrameLayout rootView;          // 全屏根容器：作为「全局移动」的坐标参照
     private TextView tip;
     private final Handler h = new Handler(Looper.getMainLooper());
     private Config cfg;
@@ -63,6 +65,7 @@ public class MainActivity extends Activity {
      * （5 个按钮 + 4 个间距 ≈ 5*38 + 4*16 = 254dp）。
      */
     private static final int INPUT_WRAP_DP = 200;
+    // 全局移动现在要求元素【完全留在屏幕内】（见 clampGlobalMove），不再保留越界可视区。
 
     /**
      * 竖排提示条尺寸（dp）。
@@ -97,16 +100,34 @@ public class MainActivity extends Activity {
 
     // ---------------------------------------------------------------- 聊天面板
     /** PC 发来的消息显示在这里（仿聊天布局），边缘把手可进入调节 */
-    private LinearLayout chatWrap;         // 面板容器（把手条 + 消息列表）
+    private LinearLayout chatWrap;         // 面板容器（顶栏 + 主体）
+    private LinearLayout chatBody;         // 面板主体（头部 + 消息）：翻转时只翻它，顶栏常驻
     private LinearLayout chatRows;         // 消息行容器
     private android.widget.ScrollView chatScroll;
     private View chatShield;               // 调节态触摸拦截层
     private LinearLayout chatTuner;        // 聊天调节工具条
+    private TextView chatHeader;           // 面板头部：本机名 + 同局域网设备数量
+    private Runnable peerListener;         // 设备数变化回调（退出时摘除）
     private boolean chatAdjustActive = false;
     private boolean chatReanchor = false;
     private float chatLastX = 0, chatLastY = 0;
     private static final float CHAT_SCALE_MIN = 0.6f;
     private static final float CHAT_SCALE_MAX = 1.6f;
+    private ImageButton chatFab;            // 面板收起后的悬浮按钮（点此展开）
+    private boolean chatCollapsed = false;  // 聊天面板是否收起为悬浮按钮
+    private boolean chatHiddenByInput = false; // 输入框获焦时临时隐藏消息框
+    private boolean pendingSendAfterRelease = false; // 松开后整句修正提交即自动上屏
+
+    // ---- 发送后「清空输入框」保护窗口 ----
+    // 讯飞在松开长按后 1~3 秒内才提交整句修正，会把刚发送的内容又写回输入框，
+    // 看起来像“发送后没清空”。保护窗口内凡是被写回的文本一律再清一次；
+    // 一旦用户主动点了输入框（想自己打字）就立刻结束保护，不干扰正常输入。
+    private long clearGuardUntil = 0L;
+    private static final long CLEAR_GUARD_MS = 6000L;
+    private ImageButton btnMsg;             // 实体按钮：点一下直接显示消息框
+    private boolean downOutsideInput = false; // 本次手势按下的位置是否在输入框之外
+    private String lastSentPlain = "";        // 上一条已发送内容（防重复发送用）
+    private long lastSentAt = 0L;             // 上一条发送时间
 
     // ---- 首启权限引导（保留，仅在设置页手动触发；不再自动弹）----
     private boolean onboardingActive = false;
@@ -127,7 +148,12 @@ public class MainActivity extends Activity {
     private final BroadcastReceiver commit = new BroadcastReceiver() {
         @Override
         public void onReceive(Context c, Intent i) {
-            // 自动发送已取消：松开长按后文字留在输入框，由用户点「电脑上屏」手动发
+            // 用户点「电脑上屏」且当时正在按住：松开后讯飞整句修正提交(COMMIT)即自动上屏，
+            // 实现「一键松开+发送」（不必再点第二次）。
+            if (pendingSendAfterRelease) {
+                pendingSendAfterRelease = false;
+                doSend(true);
+            }
         }
     };
 
@@ -154,6 +180,7 @@ public class MainActivity extends Activity {
 
         // 根用 FrameLayout：内容垂直排列 + 一个左侧竖排提示层（不挡按钮）
         FrameLayout root = new FrameLayout(this);
+        this.rootView = root;
         root.setBackgroundColor(Ui.bg(this));
         int pad = Ui.dp(this, 16);
         root.setPadding(pad, pad, pad, pad);
@@ -164,6 +191,9 @@ public class MainActivity extends Activity {
         content.setOrientation(LinearLayout.VERTICAL);
         content.setLayoutParams(new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        // 全局移动：输入框可被拖出 content 边界（横向越界），这里不能裁剪子 View
+        content.setClipChildren(false);
+        content.setClipToPadding(false);
 
         // ---- 输入框 + 右下角状态点 + 异常箭头 ----
         // 注意：这里【不能】用 WRAP_CONTENT。inputWrap 内含 ALIGN_PARENT_BOTTOM 的
@@ -218,32 +248,33 @@ public class MainActivity extends Activity {
         arrow.setVisibility(View.GONE);
         inputWrap.addView(arrow);
 
-        // 输入框调节把手：底部左侧小按钮，点击即进入调节模式（长按 5 秒的替代入口）
+        // 输入框调节把手：左下角、高对比（accent 底 + 白色把手条），点击即进入调节模式（拖动输入框）。
+        // 体积缩小为 40×26dp，避免遮挡输入区。
         ImageButton inputHandle = new ImageButton(this);
-        int ihs = Ui.dp(this, 34);
+        int ihs = Ui.dp(this, 26);
         RelativeLayout.LayoutParams ihp = new RelativeLayout.LayoutParams(
-                Ui.dp(this, 44), ihs);
+                Ui.dp(this, 40), ihs);
         ihp.addRule(RelativeLayout.ALIGN_PARENT_BOTTOM);
         ihp.addRule(RelativeLayout.ALIGN_PARENT_LEFT);
-        ihp.setMargins(Ui.dp(this, 8), 0, 0, Ui.dp(this, 6));
+        ihp.setMargins(Ui.dp(this, 6), 0, 0, Ui.dp(this, 5));
         inputHandle.setLayoutParams(ihp);
         inputHandle.setImageResource(R.drawable.kv_handle);
-        inputHandle.setBackground(Ui.buttonBg(Ui.surfaceHi(this), Ui.primaryDim(this), ihs / 2f));
-        inputHandle.setContentDescription("调节输入框");
+        inputHandle.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        inputHandle.setBackground(Ui.buttonBg(Ui.accent(this), Ui.primaryDim(this), ihs / 2f));
+        inputHandle.setElevation(Ui.dp(this, 6));
+        inputHandle.setContentDescription("调节输入框（点此进入拖动）");
         inputHandle.setOnClickListener(v -> enterInputAdjust());
         inputWrap.addView(inputHandle);
+        inputHandle.bringToFront();
 
         // 救砖入口：长按输入框右下角状态点 → 报告三个按钮的真实几何（不依赖 adb），并提供一键复位。
         // 这是为无法使用 adb 的场景准备的：几何值直接显示在屏幕上，可截屏反馈。
         statusDot.setOnLongClickListener(v -> {
             new AlertDialog.Builder(this)
-                    .setTitle("按钮布局诊断")
+                    .setTitle("布局复位")
                     .setMessage("长按状态点触发的诊断报告（可直接截屏反馈）：\n\n"
                             + side.reportGeometry())
-                    .setPositiveButton("复位按钮", (d, w) -> {
-                        side.resetLayout();
-                        showCenterTip("按钮布局已复位");
-                    })
+                    .setPositiveButton("恢复全部布局", (d, w) -> resetAllLayout())
                     .setNeutralButton("关闭", null)
                     .show();
             return true;
@@ -330,14 +361,35 @@ public class MainActivity extends Activity {
         btnPause.setOnClickListener(v -> onPauseClick());
         updatePauseIcon();
 
+        // ---- 消息框开关（实体按钮）：点一下直接把消息框显示出来 ----
+        // 场景：消息框被「收起」或被输入框临时隐藏后，用这个按钮一键叫回来。
+        btnMsg = Ui.iconButton(this, R.drawable.ic_chat, Ui.accent(this), 38);
+        btnMsg.setId(View.generateViewId());
+        btnMsg.setTag("m");
+        btnMsg.setContentDescription("显示消息框");
+        RelativeLayout.LayoutParams mlp = new RelativeLayout.LayoutParams(bs, bs);
+        mlp.addRule(RelativeLayout.ALIGN_PARENT_RIGHT);
+        mlp.addRule(RelativeLayout.BELOW, btnPause.getId());
+        mlp.topMargin = Ui.dp(this, 16);
+        btnMsg.setLayoutParams(mlp);
+        btnMsg.setOnClickListener(v -> showChatPanel());
+        btnMsg.setOnLongClickListener(v -> {
+            // 长按 = 收起（与顶栏「−」等价），方便一键来回切换
+            setChatCollapsed(true);
+            showCenterTip("已收起消息框（点按钮再叫回来）");
+            return true;
+        });
+
         side.addView(btnSettings);
         side.addView(btnHold);
         side.addView(btnSend);
         side.addView(btnClear);
         side.addView(btnPause);
+        side.addView(btnMsg);
 
         root.addView(content);
-        root.addView(side);   // 全屏按钮层，盖在 content 之上；普通态触摸穿透到输入框
+        // 注：按钮层 side 故意放在【聊天面板之后】添加（见下面 root.addView(side)），
+        //     这样它的 z 序在面板之上——面板万一被拖到按钮上，也仍是按钮优先（点得到）。
 
         // ---- 聊天面板：PC 发来的消息显示在这里（仿聊天布局），把手可进入调节 ----
         chatWrap = new LinearLayout(this);
@@ -367,7 +419,53 @@ public class MainActivity extends Activity {
         chatHandle.setContentDescription("调节聊天面板");
         chatHandle.setOnClickListener(v -> toggleChatAdjust());
         chatTop.addView(chatHandle);
+
+        // 一键恢复原始布局按钮（始终可见）：把输入框 + 聊天面板 + 五个按钮全部复位到默认位置/大小/方向
+        ImageButton chatReset = new ImageButton(this);
+        int crs = Ui.dp(this, 30);
+        LinearLayout.LayoutParams crlp = new LinearLayout.LayoutParams(crs, crs);
+        crlp.rightMargin = Ui.dp(this, 6);
+        crlp.topMargin = Ui.dp(this, 4);
+        chatReset.setLayoutParams(crlp);
+        chatReset.setImageResource(R.drawable.ic_reset);
+        chatReset.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        chatReset.setBackground(Ui.buttonBg(Ui.surfaceHi(this), Ui.primaryDim(this), crs / 2f));
+        chatReset.setContentDescription("恢复原始布局（输入框/面板/按钮）");
+        chatReset.setOnClickListener(v -> resetAllLayout());
+        chatTop.addView(chatReset, 0);   // 放在调节把手前面（更靠左）
+
+        // 收起按钮：把整个消息框收成悬浮按钮（点悬浮按钮再展开）
+        ImageButton chatCollapse = new ImageButton(this);
+        int ccs = Ui.dp(this, 30);
+        LinearLayout.LayoutParams cclp = new LinearLayout.LayoutParams(ccs, ccs);
+        cclp.rightMargin = Ui.dp(this, 6);
+        cclp.topMargin = Ui.dp(this, 4);
+        chatCollapse.setLayoutParams(cclp);
+        chatCollapse.setImageResource(R.drawable.ic_minus);
+        chatCollapse.setColorFilter(Ui.text2(this));
+        chatCollapse.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        chatCollapse.setBackground(Ui.buttonBg(Ui.surfaceHi(this), Ui.primaryDim(this), ccs / 2f));
+        chatCollapse.setContentDescription("收起消息框");
+        chatCollapse.setOnClickListener(v -> setChatCollapsed(true));
+        chatTop.addView(chatCollapse, 0);   // 最左侧
         chatWrap.addView(chatTop);
+
+        // 面板主体（头部 + 消息列表）：翻转时只旋转它，顶栏 chatTop 保持常驻，
+        // 这样即使聊天面板“上下颠倒”，调节把手与“恢复原始布局”按钮也始终在屏内、可点击。
+        chatBody = new LinearLayout(this);
+        chatBody.setOrientation(LinearLayout.VERTICAL);
+        chatBody.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        chatWrap.addView(chatBody);
+
+        // 面板头部：显示本机名称 + 同局域网在线设备数（含本机），随发现结果实时刷新
+        chatHeader = new TextView(this);
+        chatHeader.setTextSize(12);
+        chatHeader.setTypeface(null, android.graphics.Typeface.BOLD);
+        chatHeader.setTextColor(Ui.text2(this));
+        chatHeader.setPadding(Ui.dp(this, 10), Ui.dp(this, 6), Ui.dp(this, 10), Ui.dp(this, 4));
+        chatHeader.setBackground(Ui.round(Ui.surface(this), Ui.border(this), 1, 0f));
+        chatBody.addView(chatHeader);
 
         chatScroll = new android.widget.ScrollView(this);
         chatScroll.setLayoutParams(new LinearLayout.LayoutParams(
@@ -375,7 +473,7 @@ public class MainActivity extends Activity {
         chatRows = new LinearLayout(this);
         chatRows.setOrientation(LinearLayout.VERTICAL);
         chatScroll.addView(chatRows);
-        chatWrap.addView(chatScroll);
+        chatBody.addView(chatScroll);
 
         // 调节态触摸拦截层：盖住整个面板接管拖动手势
         chatShield = new View(this);
@@ -385,7 +483,28 @@ public class MainActivity extends Activity {
         chatShield.setOnTouchListener(this::onChatTouch);
         chatWrap.addView(chatShield);
 
-        root.addView(chatWrap);   // 位于 side 之下：普通触摸穿透，右侧按钮优先
+        root.addView(chatWrap);   // 先加面板
+        // 再加按钮层：z 序在面板之上（普通态触摸穿透，右侧按钮优先——
+        // 面板被拖到按钮位置时也不会把按钮的点击吃掉）
+        root.addView(side);
+
+        // 收起态悬浮按钮：消息框收起后用一个圆形按钮占位；点击展开回面板
+        chatFab = new ImageButton(this);
+        int fabS = Ui.dp(this, 52);
+        FrameLayout.LayoutParams fabLp = new FrameLayout.LayoutParams(fabS, fabS,
+                Gravity.BOTTOM | Gravity.END);
+        fabLp.rightMargin = Ui.dp(this, 14);
+        fabLp.bottomMargin = Ui.dp(this, 14);
+        chatFab.setLayoutParams(fabLp);
+        chatFab.setImageResource(R.drawable.ic_chat);
+        chatFab.setColorFilter(Color.WHITE);
+        chatFab.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        chatFab.setBackground(Ui.buttonBg(Ui.primary(this), Ui.primaryPress(this), (float) fabS / 2f));
+        chatFab.setElevation(Ui.dp(this, 8));
+        chatFab.setContentDescription("展开消息框");
+        chatFab.setOnClickListener(v -> setChatCollapsed(false));
+        chatFab.setVisibility(View.GONE);
+        root.addView(chatFab);
 
         // 聊天调节工具条（放大/缩小/翻转/复位/完成）
         chatTuner = new LinearLayout(this);
@@ -445,6 +564,7 @@ public class MainActivity extends Activity {
         overlay.setClipChildren(false);
         overlay.setClipToPadding(false);
         root.setClipChildren(false);
+        root.setClipToPadding(false);   // 全局移动：子元素可越过 16dp 内边距绘制
         root.addView(overlay);
 
         // ---- 输入框调节面板（长按输入框 5 秒后出现）----
@@ -499,6 +619,23 @@ public class MainActivity extends Activity {
 
         // 输入框：5 秒长按进入调节模式（普通态不消费事件，正常输入不受影响）
         et.setOnTouchListener((vv, ev) -> onInputTouch(vv, ev));
+        // 输入框获焦（被点击/开始输入）时，临时隐藏消息框：输入场景下不需要消息框占用空间
+        et.setOnFocusChangeListener((v, hasFocus) -> {
+            chatHiddenByInput = hasFocus;
+            updateChatVisibility();
+        });
+        // 发送后「清空输入框」保护窗口：刚发送完的几秒内，输入法（讯飞整句修正）若把内容
+        // 写回输入框，这里立刻再清一次，避免出现“发送后没清空”。
+        // 用户一旦主动点输入框（想自己打字），dispatchTouchEvent 会把窗口清零，不会误删。
+        et.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int st, int c, int a) { }
+            @Override public void onTextChanged(CharSequence s, int st, int b, int c) { }
+            @Override public void afterTextChanged(Editable s) {
+                if (System.currentTimeMillis() > clearGuardUntil) return;
+                if (s == null || s.length() == 0) return;
+                et.setText("");
+            }
+        });
 
         et.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
@@ -526,12 +663,28 @@ public class MainActivity extends Activity {
         // PC → 手机：启动局域网接收服务（端口 17892）。
         // 消息进聊天面板（来源名 + 头像），不再写入输入框。
         LanServer.start((text, from) -> postPcMessage(text, from));
+
+        // 手机间互发现 + 群发：启动发现（含本机名），挂设备数刷新回调
+        PeerManager.get().setName(cfg.deviceName());
+        PeerManager.get().start(this);
+        peerListener = this::updatePeerHeader;
+        PeerManager.get().addListener(peerListener);
+        updatePeerHeader();
+    }
+
+    /** 刷新聊天面板头部的「本机名 + 同局域网设备数量」 */
+    private void updatePeerHeader() {
+        if (chatHeader == null) return;
+        int total = PeerManager.get().totalCount();
+        String name = PeerManager.get().name();
+        chatHeader.setText("本机 " + name + " ｜ 局域网在线 " + total + " 台（含本机）");
     }
 
     /** PC → 手机：把电脑发来的文字插入输入框光标处 + 存剪贴板 + 提示 */
     /** PC → 手机：消息进聊天面板（仿聊天布局）+ 存剪贴板；不再写入输入框 */
     private void handlePcMessage(String text, String from) {
         if (text == null || text.isEmpty()) return;
+        Log.i("KeyVoiceMsg", "收到消息 from=" + from + " text=" + text);
         renderChatMessage(from, text);
         try {
             ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
@@ -681,6 +834,7 @@ public class MainActivity extends Activity {
         cfg.inputFlip(f);
         inputWrap.setRotation(f ? 180f : 0f);
         saveInputLayout();
+        if (f) syncInvertOnFlip();
     }
 
     /**
@@ -729,17 +883,8 @@ public class MainActivity extends Activity {
     private void applyInputLayout() {
         if (inputWrap == null || cfg == null) return;
         float tx = cfg.inputTx(), ty = cfg.inputTy();
-        // 历史脏存档修复：v0.3.9 的拖动 bug 曾把【离屏位移】（如 ty=2149，屏幕高才 2340）
-        // 写进 SharedPreferences。合法存档只会来自钳制后的拖动（恒在 [0, max] 内），
-        // 所以超出范围的值必然是脏数据 → 直接归零回到原始位置（而不是钳到屏幕边缘）。
-        ViewGroup p = (ViewGroup) inputWrap.getParent();
-        if (p != null && p.getWidth() > 0 && p.getHeight() > 0
-                && inputWrap.getWidth() > 0 && inputWrap.getHeight() > 0) {
-            float maxX = Math.max(0f, p.getWidth() - inputWrap.getWidth());
-            float maxY = Math.max(0f, p.getHeight() - inputWrap.getHeight());
-            if (tx < 0f || tx > maxX) tx = 0f;
-            if (ty < 0f || ty > maxY) ty = 0f;
-        }
+        // 存档合法性交给底部的 clampInputTranslation()（全局移动范围，允许负位移），
+        // 不能再把负值/越界值直接归零——那会把用户「向上/向左移过」的合法位置抹掉。
         inputWrap.setTranslationX(tx);
         inputWrap.setTranslationY(ty);
         float s = cfg.inputScale();
@@ -752,23 +897,46 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * 把输入框的位移钳制在父容器范围内，保证任何时候都完整可见。
+     * 全局移动钳制（元素完全留在屏幕内）：
+     * 可拖到屏幕上的任意位置，但【任何一边都不允许越出屏幕边界】——
+     * 既不能整块飞出去，也不能只露一条边。
      * <p>
-     * 背景：v0.3.9 的拖动瞬移 bug 曾把【离屏的位移值】（ty=2149，屏幕高才 2340）
-     * 持久化进了 SharedPreferences，之后每次启动 applyInputLayout() 都原样恢复，
-     * 输入框就一直“消失”在屏幕外。这里在恢复与拖动两个入口统一钳制：
-     * 既挡住历史脏存档，也保证全屏拖动时永远拖不出去（仍可在屏幕内任意位置）。
+     * 坐标推导：元素某边缘在屏幕上的坐标 = 布局基位(base) + translation，
+     * 要落在 [0, 屏幕宽-元素宽] 内 → translation ∈ [-base, 屏幕宽-元素宽-base]。
+     * <p>
+     * 注意：输入框宽度≈屏幕宽，因此横向可移量极小（基本贴边）；竖向可全屏移动。
+     * 若想要输入框也能横滑，需要把它改窄（如 90% 宽），可另行调整。
      */
-    private void clampInputTranslation() {
-        if (inputWrap == null) return;
-        ViewGroup p = (ViewGroup) inputWrap.getParent();
-        if (p == null || p.getWidth() <= 0 || p.getHeight() <= 0) return;
-        int w = inputWrap.getWidth(), hgt = inputWrap.getHeight();
+    private void clampGlobalMove(View v) {
+        if (v == null || rootView == null) return;
+        int cw = rootView.getWidth(), ch = rootView.getHeight();
+        if (cw <= 0 || ch <= 0) return;
+        int w = v.getWidth(), hgt = v.getHeight();
         if (w <= 0 || hgt <= 0) return;
-        float maxX = Math.max(0f, p.getWidth() - w);
-        float maxY = Math.max(0f, p.getHeight() - hgt);
-        inputWrap.setTranslationX(clamp(inputWrap.getTranslationX(), 0f, maxX));
-        inputWrap.setTranslationY(clamp(inputWrap.getTranslationY(), 0f, maxY));
+        float sx = v.getScaleX(), sy = v.getScaleY();
+        if (sx > 0f) w = Math.round(w * sx);      // 按缩放后的实际占位计算
+        if (sy > 0f) hgt = Math.round(hgt * sy);
+        int baseLeft = layoutOffsetIn(v, rootView, true);    // 元素相对 root 的布局基位
+        int baseTop = layoutOffsetIn(v, rootView, false);
+        v.setTranslationX(clamp(v.getTranslationX(), -baseLeft, cw - w - baseLeft));
+        v.setTranslationY(clamp(v.getTranslationY(), -baseTop, ch - hgt - baseTop));
+    }
+
+    /** 元素相对 ancestor 的布局基位（累加 getLeft/getTop；不含 translation） */
+    private static int layoutOffsetIn(View v, View ancestor, boolean horizontal) {
+        int d = 0;
+        View cur = v;
+        while (cur != null && cur != ancestor) {
+            d += horizontal ? cur.getLeft() : cur.getTop();
+            android.view.ViewParent p = cur.getParent();
+            if (!(p instanceof View)) break;
+            cur = (View) p;
+        }
+        return d;
+    }
+
+    private void clampInputTranslation() {
+        clampGlobalMove(inputWrap);
     }
 
     // ------------------------------------------------------- 聊天面板调节与渲染
@@ -837,8 +1005,21 @@ public class MainActivity extends Activity {
     private void toggleChatFlip() {
         boolean f = !cfg.chatFlip();
         cfg.chatFlip(f);
-        chatWrap.setRotation(f ? 180f : 0f);
+        chatBody.setRotation(f ? 180f : 0f);
         saveChatLayout();
+        if (f) syncInvertOnFlip();
+    }
+
+    /**
+     * 主页用到「翻转」（输入框/消息框颠倒）时，联动在设置里也开启「倒置显示」(反转)：
+     * 很多用户开了元素翻转后就一直想让整屏也倒过来拿，这里一次性把设置项也置位并即时生效。
+     */
+    private void syncInvertOnFlip() {
+        if (!cfg.invertMode()) {
+            cfg.invertMode(true);
+            applyOrientation();
+            showCenterTip("已联动开启倒置显示（设置里同样生效）");
+        }
     }
 
     private void resetChatLayout() {
@@ -846,7 +1027,21 @@ public class MainActivity extends Activity {
         cfg.chatTy(0f);
         cfg.chatScale(1f);
         cfg.chatFlip(false);
+        cfg.chatCollapsed(false);
         applyChatLayout();
+    }
+
+    /** 一键恢复原始 UI 布局：输入框 + 聊天面板 + 五个按钮全部回到默认位置/大小/方向 */
+    private void resetAllLayout() {
+        resetInputLayout();
+        resetChatLayout();
+        if (side != null) side.resetLayout();
+        showCenterTip("已恢复原始布局");
+    }
+
+    /** 供设置页等外部入口调用（需主页面在前台）；跨页面时由 cfg 标记位在 onResume 消费 */
+    static void requestResetLayout() {
+        if (resumed != null) resumed.resetAllLayout();
     }
 
     private void saveChatLayout() {
@@ -857,15 +1052,7 @@ public class MainActivity extends Activity {
     }
 
     private void clampChatTranslation() {
-        if (chatWrap == null) return;
-        ViewGroup p = (ViewGroup) chatWrap.getParent();
-        if (p == null || p.getWidth() <= 0 || p.getHeight() <= 0) return;
-        int w = chatWrap.getWidth(), hgt = chatWrap.getHeight();
-        if (w <= 0 || hgt <= 0) return;
-        float maxX = Math.max(0f, p.getWidth() - w);
-        float maxY = Math.max(0f, p.getHeight() - hgt);
-        chatWrap.setTranslationX(clamp(chatWrap.getTranslationX(), 0f, maxX));
-        chatWrap.setTranslationY(clamp(chatWrap.getTranslationY(), 0f, maxY));
+        clampGlobalMove(chatWrap);   // 与输入框同一套「全局移动」规则（可拖到屏幕任意位置）
     }
 
     /** 恢复聊天面板的位移/缩放/颠倒（来自持久化配置） */
@@ -877,8 +1064,83 @@ public class MainActivity extends Activity {
         if (s < CHAT_SCALE_MIN || s > CHAT_SCALE_MAX) s = 1f;
         chatWrap.setScaleX(s);
         chatWrap.setScaleY(s);
-        chatWrap.setRotation(cfg.chatFlip() ? 180f : 0f);
+        chatBody.setRotation(cfg.chatFlip() ? 180f : 0f);
+        chatCollapsed = cfg.chatCollapsed();
+        updateChatVisibility();
         clampChatTranslation();
+    }
+
+    /** 设置聊天面板是否收起为悬浮按钮（持久化） */
+    private void setChatCollapsed(boolean collapsed) {
+        chatCollapsed = collapsed;
+        if (cfg != null) cfg.chatCollapsed(collapsed);
+        updateChatVisibility();
+    }
+
+    /** 根据 收起态 + 输入框焦点态 决定面板/悬浮按钮的可见性 */
+    private void updateChatVisibility() {
+        boolean showPanel = !chatCollapsed && !chatHiddenByInput;
+        if (chatWrap != null)
+            chatWrap.setVisibility(showPanel ? View.VISIBLE : View.GONE);
+        if (chatFab != null)
+            chatFab.setVisibility((chatCollapsed && !chatHiddenByInput) ? View.VISIBLE : View.GONE);
+    }
+
+    /** 实体按钮：直接显示消息框（收起态展开 + 解除输入框的临时隐藏） */
+    private void showChatPanel() {
+        chatHiddenByInput = false;
+        setChatCollapsed(false);          // 内部会调 updateChatVisibility 并持久化
+        showCenterTip("已显示消息框");
+    }
+
+    // ------------------------------------------------ 点击非输入框区域 → 输入框失焦 + 消息框回来
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent ev) {
+        int action = ev.getActionMasked();
+        if (action == MotionEvent.ACTION_DOWN) {
+            // 只在 DOWN 记录“这次点的是不是输入框”，不做任何视图改动
+            downOutsideInput = !hitInputArea(ev);
+            if (!downOutsideInput) {
+                // 用户主动点输入框（想自己打字）→ 结束“发送后清空”保护，不干扰输入
+                clearGuardUntil = 0L;
+            }
+        } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+            if (downOutsideInput) {
+                // ⚠ 必须等手势结束（UP/CANCEL）后再改可见性：
+                //    如果在 DOWN 的同一帧就把消息框弹出来，视图树会重排，
+                //    这次手势的命中目标会变（消息框 z 序高于按钮层）——
+                //    实测后果是「发送」等按钮这次点不动、点了没反应。
+                h.post(this::releaseInputFocus);
+            }
+            downOutsideInput = false;
+        }
+        return super.dispatchTouchEvent(ev);
+    }
+
+    /** 触摸点是否落在输入区（输入框本体或其外框）内 —— 屏幕坐标比对，兼容倒置/位移 */
+    private boolean hitInputArea(MotionEvent ev) {
+        return hitView(et, ev) || hitView(inputWrap, ev);
+    }
+
+    private boolean hitView(View v, MotionEvent ev) {
+        if (v == null || v.getVisibility() != View.VISIBLE) return false;
+        android.graphics.Rect r = new android.graphics.Rect();
+        if (!v.getGlobalVisibleRect(r)) return false;
+        return r.contains((int) ev.getRawX(), (int) ev.getRawY());
+    }
+
+    /** 输入框失焦：光标消失 + 收起输入法 + 消息框重新显示 */
+    private void releaseInputFocus() {
+        if (et != null && et.hasFocus()) {
+            et.clearFocus();
+            InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+            if (imm != null) imm.hideSoftInputFromWindow(et.getWindowToken(), 0);
+        }
+        // 焦点回调通常已经把 chatHiddenByInput 置回 false，这里再兜底同步一次
+        if (chatHiddenByInput) {
+            chatHiddenByInput = false;
+            updateChatVisibility();
+        }
     }
 
     /** 聊天面板加一条消息（仿微信布局：圆头像 + 名称 + 气泡） */
@@ -923,6 +1185,29 @@ public class MainActivity extends Activity {
         tvMsg.setMaxWidth(Ui.dp(this, 240));
         bubble.addView(tvMsg);
         row.addView(bubble);
+
+        // 「复制」按钮：把这一条消息直接写进手机剪贴板（复制即用，不用先选中文本）
+        TextView btnCopy = new TextView(this);
+        btnCopy.setText("复制");
+        btnCopy.setTextSize(11);
+        btnCopy.setTextColor(Ui.primary(this));
+        btnCopy.setPadding(Ui.dp(this, 9), Ui.dp(this, 5), Ui.dp(this, 9), Ui.dp(this, 5));
+        btnCopy.setBackground(Ui.round(Ui.surfaceHi(this), Ui.border(this), 1, Ui.dp(this, 8)));
+        LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        clp.leftMargin = Ui.dp(this, 6);
+        clp.topMargin = Ui.dp(this, 2);
+        clp.gravity = Gravity.TOP;
+        btnCopy.setLayoutParams(clp);
+        btnCopy.setContentDescription("复制这条消息");
+        btnCopy.setOnClickListener(v -> {
+            ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            if (cm == null) return;
+            cm.setPrimaryClip(ClipData.newPlainText("keyvoice", text));
+            showCenterTip("已复制到剪贴板");
+        });
+        row.addView(btnCopy);
+
         chatRows.addView(row);
         chatRows.post(() -> {
             if (chatScroll != null) chatScroll.fullScroll(View.FOCUS_DOWN);
@@ -982,8 +1267,11 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * 模拟长按按钮：只负责“按住空格开始说话”。
-     * 松开动作已交给「电脑上屏」按钮（见 onSendClick）。
+     * 模拟长按按钮（话筒）：一次点击连续执行三步——
+     *   ① 清空输入框内容（每次听写都从干净状态开始）
+     *   ② 把光标落到输入框上（讯飞识别结果才会写进来）
+     *   ③ 长按空格，开始「按住说话」
+     * 松开动作交给「电脑上屏」按钮（见 onSendClick）。
      */
     private void onHoldClick() {
         if (KeyTriggerService.holding) {
@@ -994,15 +1282,25 @@ public class MainActivity extends Activity {
             showCenterTip("需要无障碍服务（注入手势用）。点右下角箭头去开启");
             return;
         }
-        if (!KeyTriggerService.instance.beginHoldFromUi()) {
-            showCenterTip("上一次长按正在复位中，稍等 1 秒再点");
-            return;
+        // ① 清空输入框：新一次听写不残留上一次的内容
+        clearGuardUntil = 0L;               // 手动清空后不再需要“发送后清空”保护
+        if (et != null) et.setText("");
+        // ② 点击输入框：请求焦点 + 拉起输入法（连续动作，故用 post 让焦点先落地再拉键盘）
+        if (et != null) {
+            et.requestFocus();
+            et.setSelection(et.getText() == null ? 0 : et.getText().length());
         }
-        et.requestFocus();
+        chatHiddenByInput = true;           // 输入场景：消息框先让位
+        updateChatVisibility();
         h.postDelayed(() -> {
             InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
             if (imm != null) imm.showSoftInput(et, InputMethodManager.SHOW_IMPLICIT);
         }, 100);
+        // ③ 长按空格（开始注入按住）
+        if (!KeyTriggerService.instance.beginHoldFromUi()) {
+            showCenterTip("上一次长按正在复位中，稍等 1 秒再点");
+            return;
+        }
         setHoldActive(true);
     }
 
@@ -1067,7 +1365,21 @@ public class MainActivity extends Activity {
         if (KeyTriggerService.holding) {
             setHoldActive(false);
             if (KeyTriggerService.instance != null) KeyTriggerService.instance.endHold();
-            showCenterTip("已松开，等出字后自动上屏…");
+            // 标记：松开后讯飞整句修正提交(COMMIT)时自动上屏，实现「一键松开+发送」
+            pendingSendAfterRelease = true;
+            showCenterTip("已松开，出字后自动上屏…");
+            // 兜底：3 秒内未收到 COMMIT（如未识别到内容），直接用当前框内文字上屏
+            h.postDelayed(() -> {
+                if (pendingSendAfterRelease) {
+                    pendingSendAfterRelease = false;
+                    doSend(true);
+                }
+            }, 3000);
+        } else if (pendingSendAfterRelease) {
+            // ⚠ 关键：上一次「松开并发送」还在等识别出字（COMMIT 尚未到）时又点了发送。
+            //    这时若直接 doSend，就会把同一条内容【再发一次】——电脑端表现为
+            //    “一条消息收到两次、输入框里粘贴两次”。这里直接吞掉这次点击。
+            showCenterTip("正在等识别出字，稍后会自动上屏…");
         } else {
             doSend(true);
         }
@@ -1082,34 +1394,63 @@ public class MainActivity extends Activity {
         }
         if (cfg.addNewline()) text += "\n";
 
+        // 防重复发送（第二道保险）：同一条内容在 2.5 秒内只发一次。
+        // 用户连点两次发送、或 COMMIT 广播与 3 秒兜底定时器撞车，都会重复走到这里。
+        long nowMs = System.currentTimeMillis();
+        String plain = text.trim();
+        if (!plain.isEmpty() && plain.equals(lastSentPlain) && (nowMs - lastSentAt) < 2500) {
+            showCenterTip("与刚发送的内容相同，已跳过重复发送");
+            return;
+        }
+        lastSentPlain = plain;
+        lastSentAt = nowMs;
+
         sending = true;
         setHoldActive(false);
         paused = false;
         updatePauseIcon();
         lastSent = text;
         String finalText = text;
+
+        // 手机互发：把同一条消息广播给同局域网所有对端，并在本机聊天面板也显示（便于查看对话）
+        final String myName = cfg.deviceName();
+        PeerManager.get().broadcast(finalText, myName);
+        runOnUiThread(() -> renderChatMessage(myName, finalText));
+
+        // 发送后「清空输入框」保护窗口：讯飞整句修正常在松开后 1~3 秒才把整句写回框里，
+        // 看起来就像“发送后没清空”。窗口期内被写回的文本由 TextWatcher 立刻再清一次。
+        clearGuardUntil = System.currentTimeMillis() + CLEAR_GUARD_MS;
+
         Sender.send(this, text, (ok, msg) -> {
             sending = false;
             if (ok) {
-                // 发送成功立即清空输入框。注意：讯飞松开后的“整句修正”可能在 1~2 秒后
-                // 才提交，把刚发送的内容重新写回框里（看起来像“没清空”）——
-                // 所以延迟检查：若框内仍是刚发送的内容（被输入法写回），再清一次；
-                // 若用户已输入新内容则不动。
-                et.setText("");
-                et.clearFocus();
-                h.postDelayed(() -> {
-                    if (et != null && et.getText() != null
-                            && et.getText().toString().trim().equals(lastSent.trim())) {
-                        et.setText("");
-                    }
-                }, 1800);
+                clearInputNow();       // 发送成功 → 立即清空输入框（光标 + 键盘一起收）
                 showCenterTip("已发送：" + finalText);
             } else {
-                // 发送失败也要执行松开长按的逻辑，否则长按残留会让讯飞一直处于录音态
+                // 发送失败也要执行松开长按的逻辑，否则长按残留会让讯飞一直处于录音态。
+                // 内容不丢：框里若已被清空，就把刚发的内容放回去。
                 releaseHold();
+                clearGuardUntil = 0L;
+                if (et != null && et.getText() != null && et.getText().toString().trim().isEmpty()) {
+                    String back = finalText.endsWith("\n")
+                            ? finalText.substring(0, finalText.length() - 1) : finalText;
+                    et.setText(back);
+                    et.setSelection(back.length());
+                }
                 showCenterTip("发送失败：" + msg);
             }
         });
+    }
+
+    /** 发送成功后清空输入框：内容清零 + 光标收起 + 键盘收起 + 消息框重新显示 */
+    private void clearInputNow() {
+        if (et == null) return;
+        et.setText("");
+        et.clearFocus();
+        InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+        if (imm != null) imm.hideSoftInputFromWindow(et.getWindowToken(), 0);
+        chatHiddenByInput = false;
+        updateChatVisibility();
     }
 
     /** 统一执行「松开长按」：复位按住态、结束无障碍注入、清除暂停标记 */
@@ -1133,6 +1474,11 @@ public class MainActivity extends Activity {
             autoLanConnect();
         }
         resumed = this;
+        // 从设置页等发起的「恢复默认布局」请求，回到前台时统一执行
+        if (cfg.layoutResetRequested()) {
+            cfg.layoutResetRequested(false);
+            resetAllLayout();
+        }
         // 回到主页面：补投暂存的电脑消息
         if (pendingPcMessage != null) {
             String[] p = pendingPcMessage;
@@ -1275,6 +1621,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         h.removeCallbacks(hideTip);
+        if (peerListener != null) PeerManager.get().removeListener(peerListener);
         try { unregisterReceiver(commit); } catch (Exception ignored) { }
         try { unregisterReceiver(result); } catch (Exception ignored) { }
         super.onDestroy();

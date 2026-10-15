@@ -63,10 +63,15 @@ public final class LanServer {
                 while (true) {
                     ds.receive(p);
                     String s = new String(p.getData(), 0, p.getLength(), StandardCharsets.UTF_8);
-                    if (s.startsWith("KV_DISCOVER")) {
+                    // 应答两类发现请求：
+                    //   KV_DISCOVER    —— 旧版 PC 端扫描（兼容）
+                    //   KV_PEER_DISCOVER —— 手机间互发现（带端口，便于对端直接 POST 消息）
+                    if (s.startsWith("KV_DISCOVER") || s.startsWith(PeerManager.REQUEST)) {
                         String name = android.os.Build.MODEL;
                         if (name == null || name.isEmpty()) name = "Android";
-                        byte[] out = ("KV_PHONE_HERE:" + name).getBytes(StandardCharsets.UTF_8);
+                        // 回包带上本机监听端口，对端据此把消息 POST 到 <ip>:<PORT>/text
+                        byte[] out = (PeerManager.REPLY + ":" + name + ":" + PORT)
+                                .getBytes(StandardCharsets.UTF_8);
                         ds.send(new java.net.DatagramPacket(out, out.length,
                                 p.getAddress(), p.getPort()));
                     }
