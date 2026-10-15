@@ -8,20 +8,28 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
- * 极简 HTTP 服务器：接收电脑端发来的文字（PC → 手机）。
+ * 极简 HTTP 服务器：接收电脑端发来的【文字】与【文件】（PC → 手机）。
  * <p>
- * 协议与 PC 端一致：POST /text，body 为 JSON {"text":"..."}；另提供 GET /ping 供探测。
+ * 端点：
+ *   POST /text          body 为 JSON {"text":"..."}（协议与 PC 端一致）
+ *   POST /file?name=…&from=…   body 为文件原始字节（Content-Length 或 chunked），
+ *                       流式落盘到 Download/KeyVoice（见 FileStore），完成回调 fileListener
+ *   GET  /ping          连通性探测
  * 端口 17892。电脑端两种方式可达：
- *   1. 局域网直连：http://&lt;手机IP&gt;:17892/text
- *   2. adb 模式：电脑端先执行 {@code adb forward tcp:17892 tcp:17892}，再发 http://127.0.0.1:17892/text
+ *   1. 局域网直连：http://&lt;手机IP&gt;:17892/…
+ *   2. adb 模式：电脑端先执行 {@code adb forward tcp:17892 tcp:17892}，再发 http://127.0.0.1:17892/…
  * <p>
- * 手机收到后的处理逻辑仿照 PC 端「收到消息」：插入输入框光标处（等同上屏）+ 存剪贴板 + 提示。
- * 实现注意：HTTP 头与 body 全部按【字节】读取（Content-Length 是字节数），
- * 用字符流读中文会因「字节数≠字符数」错位/阻塞——这是首版收不到消息的根因。
- * 只用标准 java.net，不引第三方库。
+ * 实现注意：
+ *  · HTTP 头与 body 全部按【字节】读取（Content-Length 是字节数），
+ *    用字符流读中文会因「字节数≠字符数」错位/阻塞；
+ *  · 每条连接一个线程（文件传输耗时长，绝不能阻塞文字消息的接收）；
+ *  · 只依赖标准 java.net / android.*，不引第三方库。
  */
 public final class LanServer {
 
@@ -30,18 +38,29 @@ public final class LanServer {
         boolean onMessage(String text, String from);
     }
 
+    /** 收到文件后的回调（在后台线程） */
+    public interface FileListener {
+        void onFile(String name, long size, String savedPath, String from);
+    }
+
     public static final int PORT = 17892;
     /** 设备发现端口：电脑广播 KV_DISCOVER，本机应答 KV_PHONE_HERE:<型号> */
     public static final int DISCOVER_PORT = 17893;
     private static final String TAG = "KeyVoiceMsg";
     private static final byte[] CRLFCRLF = {'\r', '\n', '\r', '\n'};
+    /** 请求头上限（防异常客户端把内存打满） */
+    private static final int MAX_HEADER = 32 * 1024;
 
     private static volatile Listener listener;
+    private static volatile FileListener fileListener;
+    private static volatile Context appCtx;
     private static volatile boolean started = false;
     /** 本机对外广播的设备名（用户可在设置里改） */
     private static volatile String deviceName = Config.defaultDeviceName();
     /** 发现应答线程是否已起来，避免 Activity 重建时重复绑定 17893 */
     private static volatile boolean discoveryStarted = false;
+    /** 每连接一线程：文件传输不能被后续文字消息挤掉 */
+    private static final ExecutorService POOL = Executors.newCachedThreadPool();
 
     private LanServer() { }
 
@@ -50,13 +69,21 @@ public final class LanServer {
     public static void start(Context ctx, Listener l) {
         listener = l;
         // 每次启动都重读一次：用户在设置里改过名字后回到主页面即可生效
-        if (ctx != null) deviceName = new Config(ctx.getApplicationContext()).effDeviceName();
+        if (ctx != null) {
+            appCtx = ctx.getApplicationContext();
+            deviceName = new Config(appCtx).effDeviceName();
+        }
         if (started) return;
         started = true;
         Thread t = new Thread(LanServer::run, "KeyVoiceLanServer");
         t.setDaemon(true);
         t.start();
         startDiscovery();
+    }
+
+    /** 注册文件接收回调（App 启动时调一次即可） */
+    public static void setFileListener(FileListener l) {
+        fileListener = l;
     }
 
     /** 设置里改了设备名后调用：立即生效，无需重启 App */
@@ -108,7 +135,7 @@ public final class LanServer {
             Log.i(TAG, "listening on port " + PORT);
             while (true) {
                 final Socket s = ss.accept();
-                handle(s);
+                POOL.execute(() -> handle(s));
             }
         } catch (Exception e) {
             Log.w(TAG, "server stopped: " + e);
@@ -118,7 +145,7 @@ public final class LanServer {
 
     private static void handle(Socket s) {
         try {
-            s.setSoTimeout(6000);
+            s.setSoTimeout(30000);
             InputStream is = s.getInputStream();
 
             // 1) 按【字节】读到 \r\n\r\n，拿完整请求头（不能用字符流，会提前吞掉 body）
@@ -131,34 +158,42 @@ public final class LanServer {
                 } else {
                     match = (b == '\r') ? 1 : 0;
                 }
+                if (head.size() > MAX_HEADER) throw new Exception("请求头过大");
             }
             String headerBlock = head.toString("UTF-8");
             String requestLine = headerBlock.isEmpty() ? "" :
                     headerBlock.split("\r\n", 2)[0];
-            boolean isPost = requestLine.startsWith("POST");
-            boolean isPing = requestLine.contains("/ping");
+            String[] parts = requestLine.split(" ");
+            String method = parts.length > 0 ? parts[0] : "";
+            String target = parts.length > 1 ? parts[1] : "";
+
+            boolean isPost = "POST".equals(method);
+            boolean isPing = target.contains("/ping");
+            boolean isFile = target.startsWith("/file");
             int len = parseContentLength(headerBlock);
-            Log.i(TAG, "req=\"" + requestLine + "\" isPost=" + isPost + " contentLength=" + len);
+            boolean chunked = headerBlock.toLowerCase().contains("transfer-encoding")
+                    && headerBlock.toLowerCase().contains("chunked");
+            Log.i(TAG, "req=\"" + requestLine + "\" len=" + len + " chunked=" + chunked);
 
-            // 2) 按【字节】精确读 body（Content-Length 是字节数，中文每字 3 字节）
-            String body = "";
-            if (isPost && len > 0) {
-                byte[] buf = new byte[len];
-                int read = 0;
-                while (read < len) {
-                    int r = is.read(buf, read, len - read);
-                    if (r < 0) break;
-                    read += r;
+            String resp;
+            if (isPost && isFile) {
+                resp = handleFileUpload(is, target, len, chunked);
+            } else if (isPost) {
+                // 按【字节】精确读 body（Content-Length 是字节数，中文每字 3 字节）
+                String body = "";
+                if (len > 0) {
+                    byte[] buf = new byte[len];
+                    int read = 0;
+                    while (read < len) {
+                        int r = is.read(buf, read, len - read);
+                        if (r < 0) break;
+                        read += r;
+                    }
+                    body = new String(buf, 0, read, StandardCharsets.UTF_8);
                 }
-                body = new String(buf, 0, read, StandardCharsets.UTF_8);
-            }
-            Log.i(TAG, "body=" + body);
-
-            String resp = "{\"ok\":true}";
-            if (isPost) {
                 String text = extractField(body, "text");
                 String from = extractField(body, "from");
-                Log.i(TAG, "extracted text=" + text + " from=" + from);
+                Log.i(TAG, "text=" + text + " from=" + from);
                 boolean delivered = false;
                 if (!text.isEmpty()) {
                     Listener l = listener;
@@ -168,6 +203,8 @@ public final class LanServer {
                 resp = "{\"ok\":true,\"delivered\":" + delivered + "}";
             } else if (isPing) {
                 resp = "{\"ok\":true,\"service\":\"keyvoice-phone\"}";
+            } else {
+                resp = "{\"ok\":true}";
             }
 
             byte[] out = resp.getBytes(StandardCharsets.UTF_8);
@@ -181,6 +218,30 @@ public final class LanServer {
         } catch (Exception e) {
             Log.w(TAG, "handle failed: " + e);
             try { s.close(); } catch (Exception ignored) { }
+        }
+    }
+
+    /** POST /file?name=…&from=…：流式落盘到 Download/KeyVoice，完成后回调。 */
+    private static String handleFileUpload(InputStream is, String target,
+                                           int len, boolean chunked) {
+        String name = queryParam(target, "name");
+        String from = queryParam(target, "from");
+        Context ctx = appCtx;
+        if (ctx == null) return "{\"ok\":false,\"err\":\"no context\"}";
+        try {
+            FileStore.Saved saved = FileStore.saveStream(ctx, name, is, len, chunked);
+            long size = saved.size;
+            Log.i(TAG, "file saved: " + saved.displayPath + " size=" + size);
+            FileListener fl = fileListener;
+            if (fl != null) {
+                try { fl.onFile(name, size, saved.displayPath, from); }
+                catch (Exception ignored) { }
+            }
+            return "{\"ok\":true,\"saved\":" + jsonStr(saved.displayPath)
+                    + ",\"size\":" + size + "}";
+        } catch (Exception e) {
+            Log.w(TAG, "file save failed: " + e);
+            return "{\"ok\":false,\"err\":" + jsonStr(String.valueOf(e.getMessage())) + "}";
         }
     }
 
@@ -198,6 +259,24 @@ public final class LanServer {
         return 0;
     }
 
+    /** 取 query 参数（URL 解码，UTF-8） */
+    private static String queryParam(String target, String key) {
+        int q = target.indexOf('?');
+        if (q < 0) return "";
+        for (String kv : target.substring(q + 1).split("&")) {
+            int e = kv.indexOf('=');
+            if (e <= 0) continue;
+            if (kv.substring(0, e).equals(key)) {
+                try {
+                    return URLDecoder.decode(kv.substring(e + 1), "UTF-8");
+                } catch (Exception ex) {
+                    return kv.substring(e + 1);
+                }
+            }
+        }
+        return "";
+    }
+
     private static String extractField(String body, String field) {
         try {
             return new org.json.JSONObject(body).optString(field, "");
@@ -205,5 +284,25 @@ public final class LanServer {
             Log.w(TAG, "json parse failed: " + e);
             return "";
         }
+    }
+
+    private static String jsonStr(String s) {
+        if (s == null) return "\"\"";
+        StringBuilder sb = new StringBuilder(s.length() + 16);
+        sb.append('"');
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '"': sb.append("\\\""); break;
+                case '\\': sb.append("\\\\"); break;
+                case '\n': sb.append("\\n"); break;
+                case '\r': sb.append("\\r"); break;
+                case '\t': sb.append("\\t"); break;
+                default:
+                    if (c < 0x20) sb.append(String.format("\\u%04x", (int) c));
+                    else sb.append(c);
+            }
+        }
+        return sb.append('"').toString();
     }
 }

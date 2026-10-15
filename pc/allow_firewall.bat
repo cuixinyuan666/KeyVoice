@@ -14,10 +14,11 @@ rem    Python 的入站阻止规则——此后无论怎么放行端口，接收
 rem    入站数据。症状极具迷惑性：电脑能发现手机，手机却永远「未发现设备」。
 rem    这里用「禁用」而不是「删除」，随时可以改回 enable=yes 恢复。
 rem
-rem  【2】放行三个端口
-rem    TCP 17890  文字接收（手机 → 电脑）
+rem  【2】放行四个端口
+rem    TCP 17890  文字 / 文件接收（手机 → 电脑）
 rem    UDP 17891  自动发现·老协议（仅电脑应答）
 rem    UDP 17893  自动发现·新协议（电脑与手机都应答，支持多设备互发现）
+rem    TCP 17894  网页远控（手机控电脑；远控关闭时不监听，放行也无风险）
 rem
 rem  用法：直接双击本文件，在弹出的 UAC 窗口点「是」。
 rem        （脚本会自己请求管理员权限，不必右键「以管理员身份运行」）
@@ -69,20 +70,23 @@ if "!KVDIS!"=="0" echo         未发现 Python 阻止规则（可能已处理�
 
 rem ---------- 2. 放行端口 ----------
 echo.
-echo   [2/2] 放行端口 17890 / 17891 / 17893……
+echo   [2/2] 放行端口 17890 / 17891 / 17893 / 17894……
 netsh advfirewall firewall delete rule name="KeyVoice TCP 17890" >nul 2>&1
 netsh advfirewall firewall delete rule name="KeyVoice UDP 17891" >nul 2>&1
 netsh advfirewall firewall delete rule name="KeyVoice UDP 17893" >nul 2>&1
+netsh advfirewall firewall delete rule name="KeyVoice TCP 17894" >nul 2>&1
 
 netsh advfirewall firewall add rule name="KeyVoice TCP 17890" dir=in action=allow protocol=TCP localport=17890
 netsh advfirewall firewall add rule name="KeyVoice UDP 17891" dir=in action=allow protocol=UDP localport=17891
 netsh advfirewall firewall add rule name="KeyVoice UDP 17893" dir=in action=allow protocol=UDP localport=17893
+netsh advfirewall firewall add rule name="KeyVoice TCP 17894" dir=in action=allow protocol=TCP localport=17894
 
 echo.
-echo   ---- 核对结果（三条都应为「启用 / 允许」）----
+echo   ---- 核对结果（四条都应为「启用 / 允许」）----
 netsh advfirewall firewall show rule name="KeyVoice TCP 17890" | findstr /C:"启用" /C:"Enabled" /C:"操作" /C:"Action" /C:"允许" /C:"Allow"
 netsh advfirewall firewall show rule name="KeyVoice UDP 17891" | findstr /C:"启用" /C:"Enabled" /C:"操作" /C:"Action" /C:"允许" /C:"Allow"
 netsh advfirewall firewall show rule name="KeyVoice UDP 17893" | findstr /C:"启用" /C:"Enabled" /C:"操作" /C:"Action" /C:"允许" /C:"Allow"
+netsh advfirewall firewall show rule name="KeyVoice TCP 17894" | findstr /C:"启用" /C:"Enabled" /C:"操作" /C:"Action" /C:"允许" /C:"Allow"
 
 echo.
 echo   完成。现在重新打开 KeyVoice 接收端，手机点「搜索设备」就能看到这台电脑了。
@@ -92,6 +96,7 @@ echo     恢复 Python 阻止规则： netsh advfirewall firewall set rule name=
 echo     删除端口放行规则：   netsh advfirewall firewall delete rule name="KeyVoice TCP 17890"
 echo                          netsh advfirewall firewall delete rule name="KeyVoice UDP 17891"
 echo                          netsh advfirewall firewall delete rule name="KeyVoice UDP 17893"
+echo                          netsh advfirewall firewall delete rule name="KeyVoice TCP 17894"
 echo.
 pause
 endlocal

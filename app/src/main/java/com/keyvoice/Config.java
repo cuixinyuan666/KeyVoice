@@ -240,4 +240,9 @@ public class Config {
     /** 跨页面「恢复默认布局」请求标记：设置页点按钮后置位，主页面 onResume 时消费 */
     public boolean layoutResetRequested() { return sp.getBoolean("layout_reset_req", false); }
     public void layoutResetRequested(boolean v) { sp.edit().putBoolean("layout_reset_req", v).apply(); }
+
+    // ---------------------------------------------------------------- 远控
+    /** 远控 PIN（手机控电脑）：电脑端远控窗口显示，手机上输入一次后记住 */
+    public String remotePin() { return sp.getString("remote_pin", ""); }
+    public void remotePin(String v) { sp.edit().putString("remote_pin", v == null ? "" : v.trim()).apply(); }
 }

@@ -12,6 +12,13 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- 文件互传：Android 9/10（API ≤ 28 的分支）写公共 Download/KeyVoice 需要；
+         29+ 走 MediaStore 不需要该权限，故限制 maxSdkVersion -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+    <!-- Android 9 上枚举 /sdcard/Download/KeyVoice 供「已收文件」列表使用 -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
 
     <application
         android:allowBackup="true"
@@ -52,6 +59,31 @@
             android:screenOrientation="portrait"
             android:theme="@style/TranslucentTheme"
             android:windowSoftInputMode="stateVisible|adjustResize" />
+
+        <!-- 文件互传页（手机 ↔ 电脑，任意类型文件） -->
+        <activity
+            android:name=".FileActivity"
+            android:exported="false"
+            android:label="KeyVoice 文件互传"
+            android:screenOrientation="portrait"
+            android:windowSoftInputMode="adjustResize" />
+
+        <!-- 远程控制页（手机控电脑，WebView 打开电脑端 17894 的远控页）；
+             configChanges 防止旋转时重建 WebView 断掉 MJPEG 流 -->
+        <activity
+            android:name=".RemoteActivity"
+            android:exported="false"
+            android:label="KeyVoice 远程控制"
+            android:screenOrientation="fullSensor"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout"
+            android:windowSoftInputMode="adjustResize" />
+
+        <!-- 打开收到的文件时用 content:// 分享（无 AndroidX 环境下的最小 FileProvider） -->
+        <provider
+            android:name=".MiniFileProvider"
+            android:authorities="com.keyvoice.files"
+            android:exported="false"
+            android:grantUriPermissions="true" />
 
         <service
             android:name=".VoiceService"

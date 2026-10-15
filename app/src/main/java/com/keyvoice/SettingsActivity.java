@@ -573,7 +573,7 @@ public class SettingsActivity extends Activity {
         Discover.scan(this, 4000, new Discover.Sink() {
             @Override public void onFound(final Discover.Device d) {
                 runOnUiThread(() -> {
-                    lanDevices.add(d);
+                    mergeDevice(d);
                     refreshLanInfo();
                 });
             }
@@ -611,6 +611,21 @@ public class SettingsActivity extends Activity {
                 });
             }
         });
+    }
+
+    /**
+     * 按 IP 合并设备：同一台电脑会以「老协议（无名字）+ 新协议（带名字）」各回一次，
+     * onFound 直接 add 会把它算成两台。合并规则：新包带名字则替换无名字的那条。
+     */
+    private void mergeDevice(Discover.Device d) {
+        for (int i = 0; i < lanDevices.size(); i++) {
+            Discover.Device old = lanDevices.get(i);
+            if (old.ip.equals(d.ip)) {
+                if (old.name.isEmpty() && !d.name.isEmpty()) lanDevices.set(i, d);
+                return;
+            }
+        }
+        lanDevices.add(d);
     }
 
     /** 选中一台设备后：填入地址 → 切局域网模式 → 保存 → 探测连通性 */

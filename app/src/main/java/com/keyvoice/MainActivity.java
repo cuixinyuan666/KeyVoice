@@ -124,6 +124,7 @@ public class MainActivity extends Activity {
     private long clearGuardUntil = 0L;
     private static final long CLEAR_GUARD_MS = 6000L;
     private ImageButton btnMsg;             // 实体按钮：点一下直接显示消息框
+    private ImageButton btnFiles, btnRemote; // 文件互传 / 远程控制 入口
     private boolean downOutsideInput = false; // 本次手势按下的位置是否在输入框之外
     private String lastSentPlain = "";        // 上一条已发送内容（防重复发送用）
     private long lastSentAt = 0L;             // 上一条发送时间
@@ -415,12 +416,37 @@ public class MainActivity extends Activity {
             return true;
         });
 
+        // ---- 文件互传（tag "f"）：左侧列，发送/接收任意类型文件 ----
+        btnFiles = Ui.iconButton(this, R.drawable.ic_file, Ui.accent(this), 38);
+        btnFiles.setId(View.generateViewId());
+        btnFiles.setTag("f");
+        btnFiles.setContentDescription("文件互传（手机 ↔ 电脑）");
+        RelativeLayout.LayoutParams flp = new RelativeLayout.LayoutParams(bs, bs);
+        flp.addRule(RelativeLayout.ALIGN_PARENT_LEFT);
+        flp.addRule(RelativeLayout.CENTER_VERTICAL);
+        btnFiles.setLayoutParams(flp);
+        btnFiles.setOnClickListener(v -> startActivity(new Intent(this, FileActivity.class)));
+
+        // ---- 远程控制（tag "r"）：手机控电脑，WebView 打开电脑端远控页 ----
+        btnRemote = Ui.iconButton(this, R.drawable.ic_remote, Ui.warning(this), 38);
+        btnRemote.setId(View.generateViewId());
+        btnRemote.setTag("r");
+        btnRemote.setContentDescription("远程控制（手机控电脑）");
+        RelativeLayout.LayoutParams rlp = new RelativeLayout.LayoutParams(bs, bs);
+        rlp.addRule(RelativeLayout.ALIGN_PARENT_LEFT);
+        rlp.addRule(RelativeLayout.BELOW, btnFiles.getId());
+        rlp.topMargin = Ui.dp(this, 16);
+        btnRemote.setLayoutParams(rlp);
+        btnRemote.setOnClickListener(v -> startActivity(new Intent(this, RemoteActivity.class)));
+
         side.addView(btnSettings);
         side.addView(btnHold);
         side.addView(btnSend);
         side.addView(btnClear);
         side.addView(btnPause);
         side.addView(btnMsg);
+        side.addView(btnFiles);
+        side.addView(btnRemote);
 
         root.addView(content);
         // 注：按钮层 side 故意放在【聊天面板之后】添加（见下面 root.addView(side)），
@@ -700,6 +726,8 @@ public class MainActivity extends Activity {
         // 消息进聊天面板（来源名 + 头像），不再写入输入框。
         // 传入 Context 是为了发现应答时带上用户在设置里改过的设备名。
         LanServer.start(this, (text, from) -> postPcMessage(text, from));
+        // 电脑发来的文件：收下后进聊天面板显示一行「文件」消息
+        LanServer.setFileListener((name, size, path, from) -> postFileMessage(name, size, path, from));
 
         // 进入主页面先刷新一次局域网设备清单（本机名 + 设备数量）
         refreshLanDevices();
@@ -734,7 +762,7 @@ public class MainActivity extends Activity {
                 if (mySeq != scanSeq) return;      // 过期扫描的结果直接丢弃
                 runOnUiThread(() -> {
                     if (mySeq != scanSeq) return;
-                    lanDevices.add(d);
+                    mergeDevice(d);
                     refreshDeviceBar();
                 });
             }
@@ -750,6 +778,22 @@ public class MainActivity extends Activity {
                 });
             }
         });
+    }
+
+    /**
+     * 按 IP 合并设备：同一台电脑会以「老协议（无名字）+ 新协议（带名字）」各回一次，
+     * onFound 直接 add 会把一台电脑算成两台（设备条闪出「2 台」再回落）。
+     * 合并规则与 Discover 内部一致：已有名字的优先，新包带名字则替换无名字的那条。
+     */
+    private void mergeDevice(Discover.Device d) {
+        for (int i = 0; i < lanDevices.size(); i++) {
+            Discover.Device old = lanDevices.get(i);
+            if (old.ip.equals(d.ip)) {
+                if (old.name.isEmpty() && !d.name.isEmpty()) lanDevices.set(i, d);
+                return;
+            }
+        }
+        lanDevices.add(d);
     }
 
     /** 把【本机名称 + 设备数量】写到设备条上 */
@@ -815,6 +859,122 @@ public class MainActivity extends Activity {
         }
         pendingPcMessage = new String[]{text, from};
         return false;
+    }
+
+    // --------------------------------------------------- PC → 手机：收到文件
+
+    /** 页面不在前台时暂存的「收到文件」事件：{name, size, path, from} */
+    private static volatile Object[] pendingPcFile = null;
+
+    /** 供 LanServer 投递文件事件：前台直接处理；不在前台则暂存 */
+    static boolean postFileMessage(String name, long size, String path, String from) {
+        MainActivity a = resumed;
+        if (a != null) {
+            a.runOnUiThread(() -> a.handleFileMessage(name, size, path, from));
+            return true;
+        }
+        pendingPcFile = new Object[]{name, size, path, from};
+        return false;
+    }
+
+    /** 收到电脑发来的文件：聊天面板加一行「文件」消息（可一键打开） */
+    private void handleFileMessage(String name, long size, String path, String from) {
+        Log.i("KeyVoiceMsg", "收到文件 name=" + name + " size=" + size + " path=" + path);
+        renderChatFile(from, name, size, path);
+        if (chatCollapsed) setChatCollapsed(false);   // 有文件进来时自动展开消息框
+    }
+
+    /** 文件消息行：头像 + 文件名/大小 + 「打开」按钮（与文字消息行同风格） */
+    private void renderChatFile(String from, String name, long size, String path) {
+        if (chatRows == null) return;
+        String who = (from == null || from.trim().isEmpty()) ? "电脑" : from.trim();
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setPadding(Ui.dp(this, 8), Ui.dp(this, 4), Ui.dp(this, 8), Ui.dp(this, 4));
+
+        TextView avatar = new TextView(this);
+        int as = Ui.dp(this, 34);
+        LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(as, as);
+        alp.gravity = Gravity.TOP;
+        avatar.setLayoutParams(alp);
+        avatar.setGravity(Gravity.CENTER);
+        avatar.setTextSize(14);
+        avatar.setTypeface(null, android.graphics.Typeface.BOLD);
+        avatar.setTextColor(Ui.onPrimary(this));
+        avatar.setText("档");
+        avatar.setBackground(Ui.buttonBg(Ui.success(this), Ui.shade(Ui.success(this), -0.25f), as / 2f));
+        row.addView(avatar);
+
+        LinearLayout bubble = new LinearLayout(this);
+        bubble.setOrientation(LinearLayout.VERTICAL);
+        bubble.setBackground(Ui.round(Ui.surfaceHi(this), Ui.border(this), 1, Ui.dp(this, 10)));
+        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        blp.leftMargin = Ui.dp(this, 8);
+        blp.topMargin = Ui.dp(this, 2);
+        bubble.setLayoutParams(blp);
+        bubble.setPadding(Ui.dp(this, 10), Ui.dp(this, 6), Ui.dp(this, 10), Ui.dp(this, 6));
+
+        TextView tvName = new TextView(this);
+        tvName.setText(who + " · 文件");
+        tvName.setTextSize(11);
+        tvName.setTextColor(Ui.text3(this));
+        bubble.addView(tvName);
+
+        TextView tvFile = new TextView(this);
+        tvFile.setText(name);
+        tvFile.setTextSize(14);
+        tvFile.setTextColor(Ui.text(this));
+        tvFile.setMaxWidth(Ui.dp(this, 220));
+        bubble.addView(tvFile);
+
+        TextView tvMeta = new TextView(this);
+        tvMeta.setText(fmtSize(size) + " · 已保存到 " + path);
+        tvMeta.setTextSize(11);
+        tvMeta.setTextColor(Ui.text3(this));
+        tvMeta.setMaxWidth(Ui.dp(this, 220));
+        bubble.addView(tvMeta);
+        row.addView(bubble);
+
+        TextView btnOpen = new TextView(this);
+        btnOpen.setText("打开");
+        btnOpen.setTextSize(11);
+        btnOpen.setTextColor(Ui.primary(this));
+        btnOpen.setPadding(Ui.dp(this, 9), Ui.dp(this, 5), Ui.dp(this, 9), Ui.dp(this, 5));
+        btnOpen.setBackground(Ui.round(Ui.surfaceHi(this), Ui.border(this), 1, Ui.dp(this, 8)));
+        LinearLayout.LayoutParams olp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        olp.leftMargin = Ui.dp(this, 6);
+        olp.topMargin = Ui.dp(this, 2);
+        olp.gravity = Gravity.TOP;
+        btnOpen.setLayoutParams(olp);
+        btnOpen.setContentDescription("打开这个文件");
+        btnOpen.setOnClickListener(v -> openReceivedFile(name));
+        row.addView(btnOpen);
+
+        chatRows.addView(row);
+        chatRows.post(() -> {
+            if (chatScroll != null) chatScroll.fullScroll(View.FOCUS_DOWN);
+        });
+    }
+
+    /** 按文件名在「已收文件」里找到并打开（列表按时间倒序，取最新同名文件） */
+    private void openReceivedFile(String name) {
+        for (FileStore.Item it : FileStore.listReceived(this)) {
+            if (it.name.equals(name)) {
+                FileActivity.openItem(this, it);
+                return;
+            }
+        }
+        showCenterTip("未找到该文件（可能已被移动）");
+    }
+
+    private static String fmtSize(long n) {
+        if (n < 0) return "大小未知";
+        if (n < 1024) return n + " B";
+        if (n < 1024 * 1024) return String.format("%.1f KB", n / 1024.0);
+        if (n < 1024L * 1024 * 1024) return String.format("%.1f MB", n / 1048576.0);
+        return String.format("%.2f GB", n / 1073741824.0);
     }
 
     /**
@@ -1610,6 +1770,12 @@ public class MainActivity extends Activity {
             String[] p = pendingPcMessage;
             pendingPcMessage = null;
             handlePcMessage(p[0], p[1]);
+        }
+        // 补投暂存的「收到文件」事件
+        if (pendingPcFile != null) {
+            Object[] f = pendingPcFile;
+            pendingPcFile = null;
+            handleFileMessage((String) f[0], (Long) f[1], (String) f[2], (String) f[3]);
         }
     }
 

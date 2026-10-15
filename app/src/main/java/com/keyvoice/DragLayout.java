@@ -32,6 +32,8 @@ public class DragLayout extends RelativeLayout {
         KEYS.add("s"); KEYS.add("h"); KEYS.add("e");
         KEYS.add("c"); KEYS.add("p");
         KEYS.add("m");   // 消息框开关按钮（实体按钮：点一下直接显示消息框）
+        KEYS.add("f");   // 文件互传（左侧列，手机 ↔ 电脑任意类型文件）
+        KEYS.add("r");   // 远程控制（左侧列，手机控电脑）
     }
 
     private boolean editMode = false;
@@ -391,6 +393,9 @@ public class DragLayout extends RelativeLayout {
                     0, first ? 0 : gap, bs, bs, prev);
             prev = key;
         }
+        // 左侧列（v0.4.0 新增）：f=文件互传（左中），r=远程控制（f 下方）
+        resetView("f", ALIGN_PARENT_LEFT, CENTER_VERTICAL, 0, 0, bs, bs, null);
+        resetView("r", ALIGN_PARENT_LEFT, BELOW, 0, gap, bs, bs, "f");
         dumpGeometry("reset");
     }
 

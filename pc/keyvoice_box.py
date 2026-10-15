@@ -13,6 +13,16 @@ KeyVoice · Windows 接收端（消息列表版，深色设计系统）
   用 has_caret() 做真实光标校验，避免打到没有焦点的窗口（修复“收到却没录入”的 bug）。
 - 底部输入框：可手动编辑 / 粘贴，点「上屏」把内容发到当前光标处；「清空」清输入框；
   「清空列表」清掉所有历史消息。
+- 【文件互传】手机 ↔ 电脑，任意类型文件：
+    · 手机 → 电脑：POST /file（手机 App「文件」页选文件即传），落盘到收件目录
+      （默认 %USERPROFILE%\\Downloads\\KeyVoice），列表里出现文件行，可一键打开。
+    · 电脑 → 手机：底部「发文件」→ 选文件 → 传给局域网/adb 发现的手机
+      （手机端 App 保存到 Download/KeyVoice）。协议形态参考 LocalSend（单请求直传）。
+- 【手机控电脑 · 网页远控】顶部「远控」按钮开/关：内置远控服务器（默认端口 17894，
+  见 kv_remote.py，MJPEG + SendInput，架构参考 noVNC/Guacamole「浏览器即客户端」）。
+  手机 App「远控」页直接用 WebView 打开即可看到本机屏幕并操作，零安装。
+- 【电脑控手机】集成 scrcpy（151k★，ADB 通道，无需在手机装任何东西）：
+  顶部「手机投屏」按钮一键检测/启动 scrcpy，USB 或无线 adb 均可。
 - 局域网自动发现（多设备互发现）：
     · 监听 UDP 17891（老协议）→ 回 KEYVOICE_HELLO:<port>
     · 监听 UDP 17893（新协议）→ 回 KV_PC_HERE:<port>:<设备名>
@@ -22,10 +32,12 @@ KeyVoice · Windows 接收端（消息列表版，深色设计系统）
 
 配色与 Android 端（res/values/colors.xml / Ui.java）共用同一套深色 token。
 用法：  python keyvoice_box.py [端口]      默认 17890
-依赖：仅 Python 标准库 + tkinter（无需 pip 安装任何东西）
+依赖：仅 Python 标准库 + tkinter（无需 pip 安装任何东西）；
+      网页远控为可选功能，需要 Pillow（界面里点「远控」会给出安装引导）。
 """
 
 import ctypes
+import http.client
 import json
 import os
 import socket
@@ -36,6 +48,8 @@ import time
 import tkinter as tk
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from tkinter import filedialog, messagebox
+from urllib.parse import quote as urlquote
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 17890
 # 手机端消息接收端口（LanServer.java 同款协议：POST /text {"text":"..."}）
@@ -46,6 +60,124 @@ PHONE_ADDR = {"ip": None}
 DISCOVER_PORT = 17893
 # 老协议发现端口（仅电脑应答）
 BEACON_PORT = 17891
+# 网页远控端口（手机控电脑；见 kv_remote.py）
+REMOTE_PORT = 17894
+
+# 把脚本目录加入 sys.path：双击运行 / pythonw 启动时也要能 import 同目录的 kv_remote
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import kv_remote
+except Exception:                        # 缺文件时不致命：远控按钮届时提示
+    kv_remote = None
+
+
+# ---------------------------------------------------------------- 文件互传工具
+
+def default_recv_dir():
+    """收件目录：%USERPROFILE%\\Downloads\\KeyVoice。
+
+    config.json 里可用 "recv_dir" 覆盖（见 load_recv_dir）。"""
+    home = os.path.expanduser("~")
+    return os.path.join(home, "Downloads", "KeyVoice")
+
+
+def load_recv_dir():
+    p = _config_path()
+    if p:
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                v = (json.load(f).get("recv_dir") or "").strip()
+            if v:
+                return v
+        except Exception:
+            pass
+    return default_recv_dir()
+
+
+def ensure_recv_dir():
+    d = load_recv_dir()
+    try:
+        os.makedirs(d, exist_ok=True)
+    except Exception:
+        d = default_recv_dir()
+        os.makedirs(d, exist_ok=True)
+    return d
+
+
+def safe_filename(name):
+    """清洗来自网络的文件名：去路径分隔与非法字符，防目录穿越（../../x）。
+
+    注意不能用 os.path.basename：Windows 上它会先把 "a:b" 里的 a: 当驱动器号，
+    把冒号吃掉；这里手动按 / 切分，再把盘符冒号等非法字符统一替换成 _。
+    """
+    name = (name or "").replace("\\", "/").split("/")[-1]
+    bad = '<>:"/\\|?*'
+    name = "".join(("_" if c in bad or ord(c) < 32 else c) for c in name).strip(" .")
+    if not name:
+        name = "file"
+    return name[:180]
+
+
+def unique_path(folder, name):
+    """目标文件已存在时按「名字 (1).ext」递增，不覆盖。"""
+    base, ext = os.path.splitext(name)
+    p = os.path.join(folder, name)
+    i = 1
+    while os.path.exists(p):
+        p = os.path.join(folder, "%s (%d)%s" % (base, i, ext))
+        i += 1
+    return p
+
+
+def human_size(n):
+    try:
+        n = float(n)
+    except Exception:
+        return "?"
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return ("%d %s" if unit == "B" else "%.1f %s") % (n, unit)
+        n /= 1024.0
+    return "%.1f GB" % n
+
+
+def _read_exact(rfile, out, total, chunk=262144):
+    """按 Content-Length 精确读 total 字节写入 out（流式，内存占用恒定）。"""
+    got = 0
+    while got < total:
+        buf = rfile.read(min(chunk, total - got))
+        if not buf:
+            break
+        out.write(buf)
+        got += len(buf)
+    return got
+
+
+def _read_chunked(rfile, out, chunk=262144):
+    """解码 HTTP/1.1 Transfer-Encoding: chunked 的请求体（少数客户端不发长度）。"""
+    got = 0
+    while True:
+        line = rfile.readline(64)
+        if not line:
+            break
+        size = int(line.split(b";")[0].strip() or b"0", 16)
+        if size == 0:
+            while True:                       # 吃掉 trailer
+                t = rfile.readline(64)
+                if not t or t in (b"\r\n", b"\n"):
+                    break
+            break
+        remain = size
+        while remain > 0:
+            buf = rfile.read(min(chunk, remain))
+            if not buf:
+                return got
+            out.write(buf)
+            got += len(buf)
+            remain -= len(buf)
+        rfile.readline(8)                     # chunk 结尾 CRLF
+    return got
+
 
 # --------------------------------------------------------- 配置文件（设备名）
 
@@ -306,12 +438,21 @@ def press_ctrl_v():
 class Handler(BaseHTTPRequestHandler):
     app = None
 
+    def _route(self):
+        from urllib.parse import urlparse, parse_qs
+        u = urlparse(self.path)
+        return u.path, parse_qs(u.query)
+
     def do_GET(self):
         # 手机端 Sender.ping() 走 GET /ping；任何 GET 都回 200 表示在线
         self.reply({"ok": True, "service": "keyvoice",
                     "connected": bool(Handler.app and Handler.app.total > 0)})
 
     def do_POST(self):
+        path, qs = self._route()
+        if path == "/file":
+            self.handle_file(qs)
+            return
         raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
         text = ""
         from_name = ""
@@ -324,6 +465,31 @@ class Handler(BaseHTTPRequestHandler):
         if text and Handler.app:
             Handler.app.receive(text, from_name)
         self.reply({"ok": True})
+
+    # ------------------------------------------------------------- 收文件
+    def handle_file(self, qs):
+        """POST /file?name=<urlencoded>[&from=<设备名>]  请求体 = 文件原始字节。
+
+        协议形态参考 LocalSend 的「单请求直传」：元数据走 query，体是纯字节流，
+        分块流式写盘（大文件不占内存），完成后回 {"ok":true,"saved":...,"size":...}。
+        """
+        name = safe_filename((qs.get("name", [""])[0] or "file"))
+        from_name = qs.get("from", [""])[0] or ""
+        total = int(self.headers.get("Content-Length") or 0)
+        chunked = "chunked" in (self.headers.get("Transfer-Encoding") or "").lower()
+        try:
+            folder = ensure_recv_dir()
+            dest = unique_path(folder, name)
+            with open(dest, "wb") as f:
+                if chunked:
+                    got = _read_chunked(self.rfile, f)
+                else:
+                    got = _read_exact(self.rfile, f, total)
+            if Handler.app:
+                Handler.app.receive_file(dest, got, from_name)
+            self.reply({"ok": True, "saved": dest, "size": got})
+        except Exception as e:
+            self.reply({"ok": False, "err": str(e)})
 
     def reply(self, obj):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
@@ -561,6 +727,9 @@ class Box:
         self._idle = None             # 空闲计时器
         self.lan_devices = []         # 最近一次扫描到的局域网设备
         self._scanning = False        # 是否正在扫描（防重入）
+        self.remote = None            # kv_remote.RemoteServer 实例（远控开启时非 None）
+        self.remote_win = None        # 远控信息小窗（Toplevel）
+        self.sending_file = False     # 是否正在向手机发文件（防重入）
 
         self.var_status = tk.StringVar(value="监听中（端口 %d）· 等待连接" % port)
         self.var_auto = tk.BooleanVar(value=True)
@@ -619,6 +788,8 @@ class Box:
         self.dev_list_label.pack(side="left", fill="x", expand=True, pady=(0, 6))
         self.btn_scan = self._hdr_btn(devbar, "搜索设备", self._scan_devices)
         self.btn_rename = self._hdr_btn(devbar, "改名", self._rename_device)
+        self.btn_remote = self._hdr_btn(devbar, "远控", self.toggle_remote)
+        self.btn_scr = self._hdr_btn(devbar, "手机投屏", self.launch_scrcpy)
 
         # 消息列表（可滚动）
         self.list_frame = tk.Frame(root, bg=BG)
@@ -649,15 +820,19 @@ class Box:
         # 回车直接群发（不需要点按钮）
         self.input_box.bind("<Return>", self._on_return)
         bar = tk.Frame(self.input_frame, bg=SURFACE)
-        bar.pack(fill="x", padx=10, pady=(0, 8))
+        bar.pack(fill="x", padx=10, pady=(0, 4))
         self._btn(bar, "上屏", self._paste_input, "left")
         self._btn(bar, "发到手机", self.send_to_phone, "left")
-        self._btn(bar, "清空输入框", self._clear_input, "left")
-        self._btn(bar, "清空列表", self._clear_list, "left")
-        tk.Checkbutton(bar, text="收到即上屏", variable=self.var_auto, bg=SURFACE, fg=TEXT2,
+        self._btn(bar, "发文件", self.send_files_to_phone, "left")
+        self._btn(bar, "收件箱", self.open_recv_dir, "left")
+        bar2 = tk.Frame(self.input_frame, bg=SURFACE)
+        bar2.pack(fill="x", padx=10, pady=(0, 8))
+        self._btn(bar2, "清空输入框", self._clear_input, "left")
+        self._btn(bar2, "清空列表", self._clear_list, "left")
+        tk.Checkbutton(bar2, text="收到即上屏", variable=self.var_auto, bg=SURFACE, fg=TEXT2,
                        selectcolor=SURFACE_HI, activebackground=SURFACE, activeforeground=TEXT,
                        font=FONT_SM, borderwidth=0, highlightthickness=0).pack(side="left", padx=8)
-        tk.Label(bar, text="   把消息拖到上面输入框可粘贴", bg=SURFACE, fg=TEXT3,
+        tk.Label(bar2, text="   拖消息到输入框可粘贴", bg=SURFACE, fg=TEXT3,
                  font=FONT_SM).pack(side="right", padx=4)
 
         root.protocol("WM_DELETE_WINDOW", self.close)
@@ -1043,6 +1218,410 @@ class Box:
         self.update_status()
         self.toast("已清空消息列表")
 
+    # ==================================================== 文件互传（手机 ↔ 电脑）
+
+    def receive_file(self, path, size, from_name=""):
+        """HTTP 线程收完文件后回调到这里：消息列表加一条文件行。"""
+        self.root.after(0, self._on_receive_file, path, size, from_name)
+
+    def _on_receive_file(self, path, size, from_name=""):
+        self.total += 1
+        msg = {"id": self.total, "type": "file", "path": path,
+               "text": os.path.basename(path), "size": size,
+               "from": from_name or ""}
+        self.messages.append(msg)
+        self._render_file(msg)
+        self.scroll_to_bottom()
+        self.update_status()
+        if not self.docked:
+            self.flash_green()
+        self.toast("收到文件 %s（%s）→ %s" % (msg["text"], human_size(size),
+                                            os.path.dirname(path)))
+
+    def _render_file(self, msg):
+        """文件消息行：头像 + 文件名/大小 + 右侧「打开 / 目录」按钮。"""
+        who = msg.get("from") or "手机"
+        row = tk.Frame(self.list_inner, bg=BG)
+        row.pack(fill="x", padx=8, pady=4)
+        btns = tk.Frame(row, bg=BG)
+        btns.pack(side="right", padx=4, pady=4)
+        b_open = tk.Button(btns, text="打开", command=lambda m=msg: self._open_file(m))
+        b_dir = tk.Button(btns, text="目录", command=lambda m=msg: self._open_file_dir(m))
+        for b in (b_open, b_dir):
+            b.configure(bg=SURFACE_HI, fg=TEXT, activebackground=PRIMARY_PRESS,
+                        activeforeground="#FFFFFF", font=FONT_SM, borderwidth=0,
+                        relief="flat", padx=8, pady=3,
+                        highlightthickness=0, highlightbackground=BORDER)
+        b_open.pack(side="top", pady=2)
+        b_dir.pack(side="top", pady=2)
+
+        av = tk.Canvas(row, width=36, height=36, bg=BG, highlightthickness=0)
+        av.create_oval(0, 0, 36, 36, fill=SUCCESS, outline="")
+        av.create_text(18, 18, text="档", fill="#062B12", font=FONT_SM)
+        av.pack(side="left", anchor="n", padx=(0, 8), pady=2)
+
+        bubble = tk.Frame(row, bg=SURFACE, highlightbackground=BORDER, highlightthickness=1)
+        bubble.pack(side="left", fill="both", expand=True)
+        tk.Label(bubble, text="%s · 文件" % who, bg=SURFACE, fg=TEXT3,
+                 font=("Microsoft YaHei", 8)).pack(anchor="w", padx=8, pady=(4, 0))
+        tk.Label(bubble, text=msg["text"], bg=SURFACE, fg=TEXT, font=FONT_SM,
+                 anchor="w", justify="left", wraplength=300).pack(
+                     anchor="w", padx=8, pady=(2, 0))
+        tk.Label(bubble, text=human_size(msg.get("size", 0)) + " · 已存入收件目录",
+                 bg=SURFACE, fg=TEXT3, font=("Microsoft YaHei", 8)).pack(
+                     anchor="w", padx=8, pady=(0, 6))
+        msg["row"] = row
+
+    def _open_file(self, msg):
+        path = msg.get("path", "")
+        try:
+            if os.path.exists(path):
+                os.startfile(path)
+            else:
+                self.toast("文件不存在（可能已被移动或删除）")
+        except Exception as e:
+            self.toast("打开失败：%s" % e)
+
+    def _open_file_dir(self, msg):
+        path = msg.get("path", "")
+        try:
+            subprocess.Popen('explorer /select,"%s"' % path)
+        except Exception:
+            self.open_recv_dir()
+
+    def open_recv_dir(self):
+        d = ensure_recv_dir()
+        try:
+            os.startfile(d)
+        except Exception as e:
+            self.toast("打开目录失败：%s" % e)
+
+    # ------------------------------------------------ 电脑 → 手机（发文件）
+
+    def send_files_to_phone(self):
+        """选文件 → 发给局域网 / adb 发现的手机（多台则群发，与「发到手机」同语义）。"""
+        if self.sending_file:
+            self.toast("正在发送文件，请稍候…")
+            return
+        files = filedialog.askopenfilenames(title="选择要发送到手机的文件（可多选）")
+        if not files:
+            return
+        files = list(files)
+        self.sending_file = True
+        self.toast("正在查找手机…")
+        threading.Thread(target=self._do_send_files, args=(files,), daemon=True).start()
+
+    def _do_send_files(self, files):
+        try:
+            targets = self._file_targets()
+            if not targets:
+                self.root.after(0, self.toast,
+                                "没有发现手机：请让手机与电脑同 WiFi，或插 USB 后走 adb")
+                return
+            for path in files:
+                if not os.path.isfile(path):
+                    continue
+                base = os.path.basename(path)
+                size = os.path.getsize(path)
+                results = []
+                for url, tname in targets:
+                    last_pct = [-1]
+
+                    def prog(sent, total, _n=tname, _b=base, _lp=last_pct):
+                        pct = int(sent * 100 / max(1, total))
+                        if pct == _lp[0] or pct % 5:
+                            return
+                        _lp[0] = pct
+                        self.root.after(0, self.var_status.set,
+                                        "发送 %s → %s：%d%%" % (_b, _n, pct))
+
+                    ok, msg = self._upload_file(url, path, prog)
+                    results.append("%s %s" % (tname, "完成" if ok else "失败"))
+                self.root.after(0, self.toast,
+                                "已发「%s」（%s）：%s" % (base, human_size(size),
+                                                        "；".join(results)))
+        finally:
+            self.sending_file = False
+            self.root.after(0, self.update_status)
+
+    def _file_targets(self):
+        """可接收文件的手机目标列表 [(url, 显示名)]：局域网发现优先，adb forward 兜底。"""
+        targets, seen = [], set()
+        try:
+            for ip, kind, name, port in discover_lan():
+                if kind != "phone" or not ip or ip in seen:
+                    continue
+                seen.add(ip)
+                targets.append(("http://%s:%d/file" % (ip, PHONE_SRV_PORT),
+                                name or ip))
+        except Exception:
+            pass
+        if PHONE_ADDR["ip"] and PHONE_ADDR["ip"] not in seen:
+            seen.add(PHONE_ADDR["ip"])
+            targets.append(("http://%s:%d/file" % (PHONE_ADDR["ip"], PHONE_SRV_PORT),
+                            "手机(记忆)"))
+        # adb 兜底：逐台 forward 到不同本地端口
+        try:
+            out = subprocess.run(["adb", "devices"], capture_output=True,
+                                 timeout=6,
+                                 creationflags=0x08000000).stdout.decode("utf-8", "ignore")
+            i = 0
+            for line in out.splitlines():
+                parts = line.split()
+                if len(parts) >= 2 and parts[1] == "device":
+                    serial = parts[0]
+                    local_port = PHONE_SRV_PORT + 1 + i
+                    subprocess.run(["adb", "-s", serial, "forward",
+                                    "tcp:%d" % local_port, "tcp:%d" % PHONE_SRV_PORT],
+                                   capture_output=True, timeout=6,
+                                   creationflags=0x08000000)
+                    url = "http://127.0.0.1:%d/file" % local_port
+                    if url not in [t[0] for t in targets]:
+                        targets.append((url, "adb:" + serial[-4:]))
+                    i += 1
+        except Exception:
+            pass
+        return targets
+
+    @staticmethod
+    def _upload_file(base_url, path, on_progress=None):
+        """把本地文件流式 POST 到 <base_url>?name=...&from=...，返回 (ok, msg)。"""
+        import urllib.parse
+        size = os.path.getsize(path)
+        name = os.path.basename(path)
+        u = urllib.parse.urlparse(base_url)
+        conn = http.client.HTTPConnection(u.hostname, u.port, timeout=30)
+        try:
+            conn.putrequest("POST", "%s?name=%s&from=%s" % (
+                u.path, urlquote(name), urlquote(DEVICE_NAME["name"])))
+            conn.putheader("Content-Type", "application/octet-stream")
+            conn.putheader("Content-Length", str(size))
+            conn.endheaders()
+            sent = 0
+            with open(path, "rb") as f:
+                while True:
+                    buf = f.read(262144)
+                    if not buf:
+                        break
+                    conn.send(buf)
+                    sent += len(buf)
+                    if on_progress:
+                        try:
+                            on_progress(sent, size)
+                        except Exception:
+                            pass
+            resp = conn.getresponse()
+            body = resp.read().decode("utf-8", "ignore")
+            try:
+                ok = bool(json.loads(body).get("ok"))
+            except Exception:
+                ok = resp.status == 200
+            return ok, body
+        except Exception as e:
+            return False, str(e)
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    # ==================================================== 远控（手机控电脑）
+
+    def _ensure_pil(self):
+        """Pillow 可能刚被安装：重新加载 kv_remote 再探测一次。"""
+        if kv_remote is None:
+            return False
+        if kv_remote.HAS_PIL:
+            return True
+        try:
+            import importlib
+            importlib.reload(kv_remote)
+        except Exception:
+            pass
+        return kv_remote.HAS_PIL
+
+    def toggle_remote(self):
+        if self.remote is not None:
+            self._stop_remote()
+            return
+        if kv_remote is None:
+            messagebox.showerror("KeyVoice", "缺少 pc/kv_remote.py，无法启动远控。")
+            return
+        if not self._ensure_pil():
+            if messagebox.askyesno(
+                    "远控需要 Pillow",
+                    "屏幕画面的压缩需要 Pillow 图像库（约 3 MB）。\n\n"
+                    "是否现在自动安装？（pip install pillow）"):
+                self._install_pillow()
+            return
+        try:
+            self.remote = kv_remote.RemoteServer(
+                port=REMOTE_PORT,
+                on_log=lambda s: self.root.after(0, self.toast, s))
+            self.remote.start()
+        except Exception as e:
+            self.remote = None
+            messagebox.showerror("远控启动失败",
+                                 "%s\n\n（端口 %d 可能被占用）" % (e, REMOTE_PORT))
+            return
+        try:
+            self.btn_remote.configure(fg=SUCCESS, text="远控:开")
+        except Exception:
+            pass
+        self._show_remote_panel()
+
+    def _stop_remote(self):
+        if self.remote is not None:
+            try:
+                self.remote.stop()
+            except Exception:
+                pass
+            self.remote = None
+        try:
+            self.btn_remote.configure(fg=TEXT2, text="远控")
+        except Exception:
+            pass
+        if self.remote_win is not None and self.remote_win.winfo_exists():
+            self.remote_win.destroy()
+        self.remote_win = None
+        self.toast("远控已关闭")
+
+    def _lan_ip(self):
+        try:
+            ip = my_ip()
+            if ip:
+                return ip
+        except Exception:
+            pass
+        return "127.0.0.1"
+
+    def _show_remote_panel(self):
+        if self.remote is None:
+            return
+        if self.remote_win is not None and self.remote_win.winfo_exists():
+            self.remote_win.lift()
+            return
+        win = tk.Toplevel(self.root)
+        win.title("KeyVoice 远控 · 手机控电脑")
+        win.configure(bg=BG)
+        win.attributes("-topmost", True)
+        win.transient(self.root)
+        self.remote_win = win
+        url = "http://%s:%d/remote" % (self._lan_ip(), self.remote.port)
+        tk.Label(win, text="手机端打开（KeyVoice「远控」页，或任意浏览器）：",
+                 bg=BG, fg=TEXT2, font=FONT_SM).pack(anchor="w", padx=16, pady=(14, 2))
+        tk.Label(win, text=url, bg=BG, fg=PRIMARY,
+                 font=("Consolas", 12, "bold")).pack(anchor="w", padx=16)
+        tk.Label(win, text="PIN 码（手机首次打开时输入一次）：",
+                 bg=BG, fg=TEXT2, font=FONT_SM).pack(anchor="w", padx=16, pady=(12, 0))
+        tk.Label(win, text=self.remote.pin, bg=BG, fg=SUCCESS,
+                 font=("Consolas", 30, "bold")).pack(anchor="w", padx=16)
+        tk.Label(win, text=("adb（USB）模式：在电脑执行一次  adb reverse tcp:%d tcp:%d，\n"
+                            "手机 App 会自动改走 127.0.0.1，无需 WiFi。\n"
+                            "局域网需在防火墙放行 TCP %d（见 allow_firewall.bat）。"
+                            % (REMOTE_PORT, REMOTE_PORT, REMOTE_PORT)),
+                 bg=BG, fg=TEXT3, font=FONT_SM, justify="left").pack(
+                     anchor="w", padx=16, pady=(8, 4))
+        row = tk.Frame(win, bg=BG)
+        row.pack(fill="x", padx=16, pady=(6, 14))
+        self._btn(row, "复制地址", lambda: (set_clipboard(url), self.toast("已复制")), "left")
+        self._btn(row, "本机浏览器打开",
+                  lambda: __import__("webbrowser").open(url + "?pin=" + self.remote.pin),
+                  "left")
+        self._btn(row, "关闭远控", self._stop_remote, "left")
+
+    def _install_pillow(self):
+        self.toast("正在安装 Pillow…（完成后请再点一次「远控」）")
+
+        def work():
+            try:
+                out = subprocess.run([sys.executable, "-m", "pip", "install", "--user", "pillow"],
+                                     capture_output=True, timeout=600,
+                                     creationflags=0x08000000)
+                ok = out.returncode == 0
+                tail = ((out.stdout or b"") + (out.stderr or b"")).decode("utf-8", "ignore")[-400:]
+            except Exception as e:
+                ok, tail = False, str(e)
+
+            def done():
+                if ok:
+                    self.toast("Pillow 安装完成：再点一次「远控」即可开启")
+                else:
+                    messagebox.showerror(
+                        "安装失败", "自动安装失败，请手动执行：\n\npip install pillow\n\n" + tail)
+            self.root.after(0, done)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    # ==================================================== 电脑控手机（scrcpy 集成）
+
+    def _scrcpy_paths(self):
+        """找 scrcpy / adb：优先 pc\\tools\\scrcpy\\（便携解压目录），再查 PATH。"""
+        import shutil
+        here = os.path.dirname(os.path.abspath(__file__))
+        sdir = os.path.join(here, "tools", "scrcpy")
+        scr = None
+        for cand in (os.path.join(sdir, "scrcpy.exe"), shutil.which("scrcpy")):
+            if cand and os.path.exists(cand):
+                scr = cand
+                break
+        adb = None
+        for cand in (os.path.join(sdir, "adb.exe"), shutil.which("adb")):
+            if cand and os.path.exists(cand):
+                adb = cand
+                break
+        return scr, adb
+
+    def _adb_devices(self, adb_exe):
+        try:
+            out = subprocess.run([adb_exe, "devices"], capture_output=True, timeout=8,
+                                 creationflags=0x08000000).stdout.decode("utf-8", "ignore")
+            devs = []
+            for line in out.splitlines():
+                parts = line.split()
+                if len(parts) >= 2 and parts[1] == "device":
+                    devs.append(parts[0])
+            return devs
+        except Exception:
+            return []
+
+    def launch_scrcpy(self):
+        """手机投屏 / 电脑控手机：一键启动 scrcpy（151k★，ADB 通道，手机不用装 App）。"""
+        scr, adb = self._scrcpy_paths()
+        if not scr:
+            if messagebox.askyesno(
+                    "未找到 scrcpy",
+                    "「手机投屏 / 电脑控手机」直接复用开源项目 scrcpy（GitHub 151k★）。\n\n"
+                    "获取方式：\n"
+                    "1. 打开 https://github.com/Genymobile/scrcpy/releases/latest\n"
+                    "2. 下载 win64 压缩包，解压到  pc\\tools\\scrcpy\\  （或把目录加入 PATH）\n"
+                    "3. 里面自带 adb.exe，插件无需另外安装\n\n"
+                    "是否现在打开下载页？"):
+                __import__("webbrowser").open(
+                    "https://github.com/Genymobile/scrcpy/releases/latest")
+            return
+        args = [scr]
+        if adb:
+            devs = self._adb_devices(adb)
+            if not devs:
+                if messagebox.askyesno(
+                        "未检测到手机",
+                        "adb 没有发现设备。\n\n"
+                        "· USB：连接手机并开启「开发者选项 → USB 调试」\n"
+                        "· 无线：先用 USB 执行一次  adb tcpip 5555，拔线后\n"
+                        "  执行  adb connect <手机IP>:5555\n\n"
+                        "是否打开 scrcpy 无线连接说明？"):
+                    __import__("webbrowser").open(
+                        "https://github.com/Genymobile/scrcpy/blob/master/doc/connection.md")
+                return
+            args += ["-s", devs[0]]
+        args += ["--stay-awake", "--window-title", "KeyVoice 手机投屏"]
+        try:
+            subprocess.Popen(args, creationflags=0x00000008)   # DETACHED：独立窗口
+            self.toast("已启动 scrcpy（手机投屏）")
+        except Exception as e:
+            messagebox.showerror("启动 scrcpy 失败", str(e))
+
     # ------------------------------------------------- 设备名 / 设备数量
 
     def _apply_device_name(self, name):
@@ -1359,6 +1938,11 @@ class Box:
 
     def close(self):
         try:
+            if self.remote is not None:
+                self.remote.stop()
+        except Exception:
+            pass
+        try:
             self.root.destroy()
         finally:
             raise SystemExit(0)
@@ -1370,6 +1954,9 @@ def main():
         print("adb 模式：  adb reverse tcp:%d tcp:%d" % (PORT, PORT))
         print("局域网：手机点「搜索设备」会自动找到本机（电脑和手机都能互相发现）")
         print("本机名称：%s（界面右上角「改名」可修改）" % DEVICE_NAME["name"])
+        print("文件互传：手机 → 电脑自动存入 %s" % ensure_recv_dir())
+        print("         电脑 → 手机点底部「发文件」")
+        print("网页远控：点顶部「远控」（手机控电脑）；「手机投屏」调用 scrcpy（电脑控手机）")
     except Exception:
         pass
     threading.Thread(target=udp_listen, args=(PORT,), daemon=True).start()
