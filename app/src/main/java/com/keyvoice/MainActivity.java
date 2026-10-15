@@ -95,6 +95,19 @@ public class MainActivity extends Activity {
     /** 进入调节态后第一次移动只做锚点校准，避免输入框瞬移“消失” */
     private boolean inputReanchor = false;
 
+    // ---------------------------------------------------------------- 聊天面板
+    /** PC 发来的消息显示在这里（仿聊天布局），边缘把手可进入调节 */
+    private LinearLayout chatWrap;         // 面板容器（把手条 + 消息列表）
+    private LinearLayout chatRows;         // 消息行容器
+    private android.widget.ScrollView chatScroll;
+    private View chatShield;               // 调节态触摸拦截层
+    private LinearLayout chatTuner;        // 聊天调节工具条
+    private boolean chatAdjustActive = false;
+    private boolean chatReanchor = false;
+    private float chatLastX = 0, chatLastY = 0;
+    private static final float CHAT_SCALE_MIN = 0.6f;
+    private static final float CHAT_SCALE_MAX = 1.6f;
+
     // ---- 首启权限引导（保留，仅在设置页手动触发；不再自动弹）----
     private boolean onboardingActive = false;
     private boolean onboardWaitingReturn = false;
@@ -114,12 +127,7 @@ public class MainActivity extends Activity {
     private final BroadcastReceiver commit = new BroadcastReceiver() {
         @Override
         public void onReceive(Context c, Intent i) {
-            String t = et.getText() == null ? "" : et.getText().toString();
-            if (t.trim().isEmpty()) {
-                showCenterTip("已松开，识别出字后点「电脑上屏」发送");
-            } else {
-                doSend(true);
-            }
+            // 自动发送已取消：松开长按后文字留在输入框，由用户点「电脑上屏」手动发
         }
     };
 
@@ -209,6 +217,21 @@ public class MainActivity extends Activity {
         arrow.setLayoutParams(arp);
         arrow.setVisibility(View.GONE);
         inputWrap.addView(arrow);
+
+        // 输入框调节把手：底部左侧小按钮，点击即进入调节模式（长按 5 秒的替代入口）
+        ImageButton inputHandle = new ImageButton(this);
+        int ihs = Ui.dp(this, 34);
+        RelativeLayout.LayoutParams ihp = new RelativeLayout.LayoutParams(
+                Ui.dp(this, 44), ihs);
+        ihp.addRule(RelativeLayout.ALIGN_PARENT_BOTTOM);
+        ihp.addRule(RelativeLayout.ALIGN_PARENT_LEFT);
+        ihp.setMargins(Ui.dp(this, 8), 0, 0, Ui.dp(this, 6));
+        inputHandle.setLayoutParams(ihp);
+        inputHandle.setImageResource(R.drawable.kv_handle);
+        inputHandle.setBackground(Ui.buttonBg(Ui.surfaceHi(this), Ui.primaryDim(this), ihs / 2f));
+        inputHandle.setContentDescription("调节输入框");
+        inputHandle.setOnClickListener(v -> enterInputAdjust());
+        inputWrap.addView(inputHandle);
 
         // 救砖入口：长按输入框右下角状态点 → 报告三个按钮的真实几何（不依赖 adb），并提供一键复位。
         // 这是为无法使用 adb 的场景准备的：几何值直接显示在屏幕上，可截屏反馈。
@@ -315,6 +338,81 @@ public class MainActivity extends Activity {
 
         root.addView(content);
         root.addView(side);   // 全屏按钮层，盖在 content 之上；普通态触摸穿透到输入框
+
+        // ---- 聊天面板：PC 发来的消息显示在这里（仿聊天布局），把手可进入调节 ----
+        chatWrap = new LinearLayout(this);
+        chatWrap.setOrientation(LinearLayout.VERTICAL);
+        chatWrap.setBackground(Ui.round(0xE6161A21, Ui.border(this), 1, Ui.dp(this, 12)));
+        FrameLayout.LayoutParams chatLp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, Ui.dp(this, 320),
+                Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        chatLp.leftMargin = Ui.dp(this, 8);
+        chatLp.rightMargin = Ui.dp(this, 8);
+        chatLp.bottomMargin = Ui.dp(this, 8);
+        chatWrap.setLayoutParams(chatLp);
+
+        LinearLayout chatTop = new LinearLayout(this);
+        chatTop.setOrientation(LinearLayout.HORIZONTAL);
+        chatTop.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
+        chatTop.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        ImageButton chatHandle = new ImageButton(this);
+        int chs = Ui.dp(this, 30);
+        LinearLayout.LayoutParams chp = new LinearLayout.LayoutParams(chs, chs);
+        chp.rightMargin = Ui.dp(this, 6);
+        chp.topMargin = Ui.dp(this, 4);
+        chatHandle.setLayoutParams(chp);
+        chatHandle.setImageResource(R.drawable.kv_handle);
+        chatHandle.setBackground(Ui.buttonBg(Ui.surfaceHi(this), Ui.primaryDim(this), chs / 2f));
+        chatHandle.setContentDescription("调节聊天面板");
+        chatHandle.setOnClickListener(v -> toggleChatAdjust());
+        chatTop.addView(chatHandle);
+        chatWrap.addView(chatTop);
+
+        chatScroll = new android.widget.ScrollView(this);
+        chatScroll.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        chatRows = new LinearLayout(this);
+        chatRows.setOrientation(LinearLayout.VERTICAL);
+        chatScroll.addView(chatRows);
+        chatWrap.addView(chatScroll);
+
+        // 调节态触摸拦截层：盖住整个面板接管拖动手势
+        chatShield = new View(this);
+        chatShield.setVisibility(View.GONE);
+        chatShield.setLayoutParams(new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        chatShield.setOnTouchListener(this::onChatTouch);
+        chatWrap.addView(chatShield);
+
+        root.addView(chatWrap);   // 位于 side 之下：普通触摸穿透，右侧按钮优先
+
+        // 聊天调节工具条（放大/缩小/翻转/复位/完成）
+        chatTuner = new LinearLayout(this);
+        chatTuner.setOrientation(LinearLayout.VERTICAL);
+        chatTuner.setBackground(Ui.round(Ui.surface(this), Ui.border(this), 1, Ui.dp(this, 12)));
+        chatTuner.setPadding(Ui.dp(this, 8), Ui.dp(this, 8), Ui.dp(this, 8), Ui.dp(this, 8));
+        chatTuner.setVisibility(View.GONE);
+        LinearLayout cr1 = new LinearLayout(this);
+        cr1.setOrientation(LinearLayout.HORIZONTAL);
+        cr1.addView(tunerBtn(this, R.drawable.ic_plus, "放大面板", v -> scaleChat(1.12f)));
+        cr1.addView(tunerBtn(this, R.drawable.ic_minus, "缩小面板", v -> scaleChat(1f / 1.12f)));
+        LinearLayout cr2 = new LinearLayout(this);
+        cr2.setOrientation(LinearLayout.HORIZONTAL);
+        cr2.addView(tunerBtn(this, R.drawable.ic_flip, "上下颠倒", v -> toggleChatFlip()));
+        cr2.addView(tunerBtn(this, R.drawable.ic_reset, "复位", v -> resetChatLayout()));
+        cr2.addView(tunerBtn(this, R.drawable.ic_check, "完成", v -> exitChatAdjust()));
+        chatTuner.addView(cr1);
+        chatTuner.addView(cr2);
+        FrameLayout.LayoutParams ctlp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.RIGHT | Gravity.CENTER_VERTICAL);
+        ctlp.rightMargin = Ui.dp(this, 4);
+        chatTuner.setLayoutParams(ctlp);
+        root.addView(chatTuner);
+
+        // 恢复聊天面板布局（等首帧布局完成）
+        chatWrap.post(this::applyChatLayout);
 
         // ---- 左侧竖排短提示层 ----
         // 位置：本页是 reversePortrait，Activity 内容在屏幕上被旋转 180°，
@@ -426,41 +524,34 @@ public class MainActivity extends Activity {
         }
 
         // PC → 手机：启动局域网接收服务（端口 17892）。
-        // 处理逻辑仿照 PC 端「收到消息」：插入输入框光标处（等同上屏）+ 存剪贴板 + 提示。
-        LanServer.start(text -> postPcMessage(text));
+        // 消息进聊天面板（来源名 + 头像），不再写入输入框。
+        LanServer.start((text, from) -> postPcMessage(text, from));
     }
 
     /** PC → 手机：把电脑发来的文字插入输入框光标处 + 存剪贴板 + 提示 */
-    private void handlePcMessage(String text) {
-        if (et == null || text == null || text.isEmpty()) return;
-        fromPc = true;
-        try {
-            int pos = et.getSelectionStart();
-            if (pos < 0) pos = et.getText() == null ? 0 : et.getText().length();
-            et.getText().insert(pos, text);
-        } finally {
-            fromPc = false;
-        }
+    /** PC → 手机：消息进聊天面板（仿聊天布局）+ 存剪贴板；不再写入输入框 */
+    private void handlePcMessage(String text, String from) {
+        if (text == null || text.isEmpty()) return;
+        renderChatMessage(from, text);
         try {
             ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
             if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("keyvoice", text));
         } catch (Exception ignored) { }
-        showCenterTip("已收到电脑消息（已入框+存剪贴板）");
     }
 
-    /** 页面不在前台时暂存的电脑消息：回到主页面立即入框（修复“电脑发消息显示失败”） */
-    private static volatile String pendingPcMessage = null;
-    /** 应用级 Context：供后台线程弹 Toast 用 */
+    /** 页面不在前台时暂存的电脑消息：回到主页面立即入聊天面板 */
+    private static volatile String[] pendingPcMessage = null;
+    /** 应用级 Context */
     private static android.content.Context appCtx;
 
-    /** 供 LanServer 投递：前台直接处理；不在前台则暂存 + Toast 提示（此 ROM 吞 logcat，必须有可见反馈） */
-    static boolean postPcMessage(String text) {
+    /** 供 LanServer 投递：前台直接处理；不在前台则暂存（回前台自动显示） */
+    static boolean postPcMessage(String text, String from) {
         MainActivity a = resumed;
         if (a != null) {
-            a.runOnUiThread(() -> a.handlePcMessage(text));
+            a.runOnUiThread(() -> a.handlePcMessage(text, from));
             return true;
         }
-        pendingPcMessage = text;
+        pendingPcMessage = new String[]{text, from};
         return false;
     }
 
@@ -680,6 +771,164 @@ public class MainActivity extends Activity {
         inputWrap.setTranslationY(clamp(inputWrap.getTranslationY(), 0f, maxY));
     }
 
+    // ------------------------------------------------------- 聊天面板调节与渲染
+
+    /** 聊天面板触摸（仅调节态）：拖动移动面板 */
+    private boolean onChatTouch(View v, MotionEvent ev) {
+        if (!chatAdjustActive) return false;
+        switch (ev.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN:
+                chatLastX = ev.getRawX();
+                chatLastY = ev.getRawY();
+                chatReanchor = false;
+                break;
+            case MotionEvent.ACTION_MOVE:
+                if (chatReanchor) {   // 进入调节态后的第一次移动只校准锚点
+                    chatLastX = ev.getRawX();
+                    chatLastY = ev.getRawY();
+                    chatReanchor = false;
+                    return true;
+                }
+                chatWrap.setTranslationX(chatWrap.getTranslationX() + (ev.getRawX() - chatLastX));
+                chatWrap.setTranslationY(chatWrap.getTranslationY() + (ev.getRawY() - chatLastY));
+                chatLastX = ev.getRawX();
+                chatLastY = ev.getRawY();
+                clampChatTranslation();
+                break;
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_CANCEL:
+                saveChatLayout();
+                break;
+        }
+        return true;
+    }
+
+    private void toggleChatAdjust() {
+        if (chatAdjustActive) exitChatAdjust();
+        else enterChatAdjust();
+    }
+
+    private void enterChatAdjust() {
+        chatAdjustActive = true;
+        chatReanchor = true;
+        chatShield.setVisibility(View.VISIBLE);
+        chatShield.bringToFront();
+        chatTuner.setVisibility(View.VISIBLE);
+        chatTuner.bringToFront();
+    }
+
+    private void exitChatAdjust() {
+        chatAdjustActive = false;
+        chatTuner.setVisibility(View.GONE);
+        chatShield.setVisibility(View.GONE);
+        saveChatLayout();
+    }
+
+    private void scaleChat(float factor) {
+        float cur = chatWrap.getScaleX();
+        float s = clamp(cur * factor, CHAT_SCALE_MIN, CHAT_SCALE_MAX);
+        if (factor > 1f && cur >= CHAT_SCALE_MAX - 0.001f) return;
+        chatWrap.setScaleX(s);
+        chatWrap.setScaleY(s);
+        clampChatTranslation();
+        saveChatLayout();
+    }
+
+    private void toggleChatFlip() {
+        boolean f = !cfg.chatFlip();
+        cfg.chatFlip(f);
+        chatWrap.setRotation(f ? 180f : 0f);
+        saveChatLayout();
+    }
+
+    private void resetChatLayout() {
+        cfg.chatTx(0f);
+        cfg.chatTy(0f);
+        cfg.chatScale(1f);
+        cfg.chatFlip(false);
+        applyChatLayout();
+    }
+
+    private void saveChatLayout() {
+        if (cfg == null || chatWrap == null) return;
+        cfg.chatTx(chatWrap.getTranslationX());
+        cfg.chatTy(chatWrap.getTranslationY());
+        cfg.chatScale(chatWrap.getScaleX());
+    }
+
+    private void clampChatTranslation() {
+        if (chatWrap == null) return;
+        ViewGroup p = (ViewGroup) chatWrap.getParent();
+        if (p == null || p.getWidth() <= 0 || p.getHeight() <= 0) return;
+        int w = chatWrap.getWidth(), hgt = chatWrap.getHeight();
+        if (w <= 0 || hgt <= 0) return;
+        float maxX = Math.max(0f, p.getWidth() - w);
+        float maxY = Math.max(0f, p.getHeight() - hgt);
+        chatWrap.setTranslationX(clamp(chatWrap.getTranslationX(), 0f, maxX));
+        chatWrap.setTranslationY(clamp(chatWrap.getTranslationY(), 0f, maxY));
+    }
+
+    /** 恢复聊天面板的位移/缩放/颠倒（来自持久化配置） */
+    private void applyChatLayout() {
+        if (chatWrap == null || cfg == null) return;
+        chatWrap.setTranslationX(cfg.chatTx());
+        chatWrap.setTranslationY(cfg.chatTy());
+        float s = cfg.chatScale();
+        if (s < CHAT_SCALE_MIN || s > CHAT_SCALE_MAX) s = 1f;
+        chatWrap.setScaleX(s);
+        chatWrap.setScaleY(s);
+        chatWrap.setRotation(cfg.chatFlip() ? 180f : 0f);
+        clampChatTranslation();
+    }
+
+    /** 聊天面板加一条消息（仿微信布局：圆头像 + 名称 + 气泡） */
+    private void renderChatMessage(String from, String text) {
+        if (chatRows == null || text == null) return;
+        String who = (from == null || from.trim().isEmpty()) ? "电脑" : from.trim();
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setPadding(Ui.dp(this, 8), Ui.dp(this, 4), Ui.dp(this, 8), Ui.dp(this, 4));
+
+        TextView avatar = new TextView(this);
+        int as = Ui.dp(this, 34);
+        LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(as, as);
+        alp.gravity = Gravity.TOP;
+        avatar.setLayoutParams(alp);
+        avatar.setGravity(Gravity.CENTER);
+        avatar.setTextSize(14);
+        avatar.setTypeface(null, android.graphics.Typeface.BOLD);
+        avatar.setTextColor(Color.WHITE);
+        avatar.setText(who.substring(0, 1));
+        avatar.setBackground(Ui.buttonBg(Ui.primary(this), Ui.primaryPress(this), as / 2f));
+        row.addView(avatar);
+
+        LinearLayout bubble = new LinearLayout(this);
+        bubble.setOrientation(LinearLayout.VERTICAL);
+        bubble.setBackground(Ui.round(Ui.surfaceHi(this), Ui.border(this), 1, Ui.dp(this, 10)));
+        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        blp.leftMargin = Ui.dp(this, 8);
+        blp.topMargin = Ui.dp(this, 2);
+        bubble.setLayoutParams(blp);
+        bubble.setPadding(Ui.dp(this, 10), Ui.dp(this, 6), Ui.dp(this, 10), Ui.dp(this, 6));
+        TextView tvName = new TextView(this);
+        tvName.setText(who);
+        tvName.setTextSize(11);
+        tvName.setTextColor(Ui.text3(this));
+        bubble.addView(tvName);
+        TextView tvMsg = new TextView(this);
+        tvMsg.setText(text);
+        tvMsg.setTextSize(14);
+        tvMsg.setTextColor(Ui.text(this));
+        tvMsg.setMaxWidth(Ui.dp(this, 240));
+        bubble.addView(tvMsg);
+        row.addView(bubble);
+        chatRows.addView(row);
+        chatRows.post(() -> {
+            if (chatScroll != null) chatScroll.fullScroll(View.FOCUS_DOWN);
+        });
+    }
+
     /** 调节面板上的小按钮，外观与主页面圆形按钮体系一致 */
     private View tunerBtn(android.content.Context c, int iconRes, String desc,
                           android.view.View.OnClickListener cmd) {
@@ -886,9 +1135,9 @@ public class MainActivity extends Activity {
         resumed = this;
         // 回到主页面：补投暂存的电脑消息
         if (pendingPcMessage != null) {
-            String t = pendingPcMessage;
+            String[] p = pendingPcMessage;
             pendingPcMessage = null;
-            handlePcMessage(t);
+            handlePcMessage(p[0], p[1]);
         }
     }
 

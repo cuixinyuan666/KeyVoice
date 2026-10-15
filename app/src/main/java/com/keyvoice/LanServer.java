@@ -26,10 +26,12 @@ public final class LanServer {
 
     public interface Listener {
         /** @return true=已投递到前台主页面；false=页面不在前台已暂存 */
-        boolean onMessage(String text);
+        boolean onMessage(String text, String from);
     }
 
     public static final int PORT = 17892;
+    /** 设备发现端口：电脑广播 KV_DISCOVER，本机应答 KV_PHONE_HERE:<型号> */
+    public static final int DISCOVER_PORT = 17893;
     private static final String TAG = "KeyVoiceMsg";
     private static final byte[] CRLFCRLF = {'\r', '\n', '\r', '\n'};
 
@@ -45,6 +47,34 @@ public final class LanServer {
         if (started) return;
         started = true;
         Thread t = new Thread(LanServer::run, "KeyVoiceLanServer");
+        t.setDaemon(true);
+        t.start();
+        startDiscovery();
+    }
+
+    /** 应答电脑端的 UDP 广播发现：让同一局域网的电脑能列出本机（多设备互发现） */
+    private static void startDiscovery() {
+        Thread t = new Thread(() -> {
+            try {
+                java.net.DatagramSocket ds = new java.net.DatagramSocket(DISCOVER_PORT);
+                ds.setBroadcast(true);
+                byte[] buf = new byte[128];
+                java.net.DatagramPacket p = new java.net.DatagramPacket(buf, buf.length);
+                while (true) {
+                    ds.receive(p);
+                    String s = new String(p.getData(), 0, p.getLength(), StandardCharsets.UTF_8);
+                    if (s.startsWith("KV_DISCOVER")) {
+                        String name = android.os.Build.MODEL;
+                        if (name == null || name.isEmpty()) name = "Android";
+                        byte[] out = ("KV_PHONE_HERE:" + name).getBytes(StandardCharsets.UTF_8);
+                        ds.send(new java.net.DatagramPacket(out, out.length,
+                                p.getAddress(), p.getPort()));
+                    }
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "discovery responder stopped: " + e);
+            }
+        }, "KeyVoiceDiscover");
         t.setDaemon(true);
         t.start();
     }
@@ -103,12 +133,13 @@ public final class LanServer {
 
             String resp = "{\"ok\":true}";
             if (isPost) {
-                String text = extractText(body);
-                Log.i(TAG, "extracted text=" + text);
+                String text = extractField(body, "text");
+                String from = extractField(body, "from");
+                Log.i(TAG, "extracted text=" + text + " from=" + from);
                 boolean delivered = false;
                 if (!text.isEmpty()) {
                     Listener l = listener;
-                    if (l != null) delivered = l.onMessage(text);
+                    if (l != null) delivered = l.onMessage(text, from);
                 }
                 // 投递结果直接写进响应：ROM 吞应用日志时，电脑端也能知道送达情况
                 resp = "{\"ok\":true,\"delivered\":" + delivered + "}";
@@ -144,9 +175,9 @@ public final class LanServer {
         return 0;
     }
 
-    private static String extractText(String body) {
+    private static String extractField(String body, String field) {
         try {
-            return new org.json.JSONObject(body).optString("text", "");
+            return new org.json.JSONObject(body).optString(field, "");
         } catch (Exception e) {
             Log.w(TAG, "json parse failed: " + e);
             return "";

@@ -191,4 +191,20 @@ public class Config {
     /** 输入框是否上下颠倒（旋转 180°） */
     public boolean inputFlip() { return sp.getBoolean("input_flip", false); }
     public void inputFlip(boolean v) { sp.edit().putBoolean("input_flip", v).apply(); }
+
+    // ---------------------------------------------------------------- 聊天面板布局
+    // PC 发来的消息显示在聊天面板里；面板可拖动/缩放/翻转，布局持久化。
+
+    public float chatTx() { return sp.getFloat("chat_tx", 0f); }
+    public void chatTx(float v) { sp.edit().putFloat("chat_tx", v).apply(); }
+
+    public float chatTy() { return sp.getFloat("chat_ty", 0f); }
+    public void chatTy(float v) { sp.edit().putFloat("chat_ty", v).apply(); }
+
+    public float chatScale() { return sp.getFloat("chat_scale", 1f); }
+    public void chatScale(float v) { sp.edit().putFloat("chat_scale", v).apply(); }
+
+    /** 聊天面板是否上下颠倒（旋转 180°） */
+    public boolean chatFlip() { return sp.getBoolean("chat_flip", false); }
+    public void chatFlip(boolean v) { sp.edit().putBoolean("chat_flip", v).apply(); }
 }

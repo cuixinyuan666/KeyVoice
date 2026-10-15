@@ -33,21 +33,11 @@ public class VoiceInputActivity extends Activity {
     private final Handler h = new Handler(Looper.getMainLooper());
     private Config cfg;
     private boolean sending = false;
-    /** 模拟空格“松开”后置位：等讯飞出字后立即发送（优先于普通自动发送） */
-    private boolean commitWait = false;
-
-    private final Runnable autoSendTask = () -> doSend(false);
 
     private final BroadcastReceiver commit = new BroadcastReceiver() {
         @Override
         public void onReceive(Context c, Intent i) {
-            String t = et.getText() == null ? "" : et.getText().toString();
-            if (t.trim().isEmpty()) {
-                commitWait = true;   // 松开了但讯飞还没出字，等文字一到就发
-                tvStatus.setText("已松开，等识别出字后自动发送…");
-            } else {
-                doSend(true);
-            }
+            // 自动发送已取消：松开长按后文字留在框内，由用户点「发送」手动发
         }
     };
 
@@ -65,10 +55,10 @@ public class VoiceInputActivity extends Activity {
         super.onCreate(savedInstanceState);
         instance = this;
         cfg = new Config(this);
-        // 方向跟随配置：默认跟随系统，避免倒置手机时系统返回/Home 被搬到顶部
+        // 方向：只允许竖屏/翻转竖屏（与主页面一致），永不横屏
         setRequestedOrientation(cfg.invertMode()
                 ? android.content.pm.ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT
-                : android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+                : android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
 
         setContentView(R.layout.activity_voice);
 
@@ -95,18 +85,7 @@ public class VoiceInputActivity extends Activity {
             @Override public void onTextChanged(CharSequence s, int a, int b, int c) { }
 
             @Override public void afterTextChanged(Editable s) {
-                if (KeyTriggerService.holding) return; // 正在“按住空格”录音，禁止自动发送打断
-                if (commitWait && s != null && !s.toString().trim().isEmpty()) {
-                    // 模拟空格松开后，讯飞出字 -> 立即发送
-                    commitWait = false;
-                    h.removeCallbacks(autoSendTask);
-                    h.postDelayed(() -> doSend(false), 700);
-                    return;
-                }
-                if (!cfg.autoSend()) return;
-                if (s == null || s.toString().trim().isEmpty()) return;
-                h.removeCallbacks(autoSendTask);
-                h.postDelayed(autoSendTask, cfg.idleMs());
+                // 自动发送已取消：文字只落在输入框，由用户点「发送」手动发到电脑
             }
         });
 
@@ -130,7 +109,7 @@ public class VoiceInputActivity extends Activity {
                 if (imm != null) imm.hideSoftInputFromWindow(et.getWindowToken(), 0);
             });
         } else {
-            tvStatus.setText("输入窗口已就绪：输入法弹出后即可语音输入，文字会自动发送");
+            tvStatus.setText("输入窗口已就绪：语音出字后点「发送」发到电脑");
             et.requestFocus();
             et.postDelayed(() -> {
                 InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
@@ -160,7 +139,6 @@ public class VoiceInputActivity extends Activity {
 
     @Override
     protected void onDestroy() {
-        h.removeCallbacks(autoSendTask);
         try {
             unregisterReceiver(commit);
         } catch (Exception ignored) {

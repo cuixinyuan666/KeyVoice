@@ -222,12 +222,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
         text = ""
+        from_name = ""
         try:
-            text = json.loads(raw.decode("utf-8")).get("text", "")
+            o = json.loads(raw.decode("utf-8"))
+            text = o.get("text", "")
+            from_name = o.get("from", "")
         except Exception:
             pass
         if text and Handler.app:
-            Handler.app.receive(text)
+            Handler.app.receive(text, from_name)
         self.reply({"ok": True})
 
     def reply(self, obj):
@@ -261,6 +264,84 @@ def udp_listen(port):
                 if b"KEYVOICE_DISCOVER" in data:
                     PHONE_ADDR["ip"] = addr[0]   # 记住手机 IP，供「发到手机」直连
                     s.sendto(("KEYVOICE_HELLO:%d" % port).encode("utf-8"), addr)
+            except socket.timeout:
+                continue
+            except Exception:
+                break
+    except Exception:
+        pass
+
+
+def my_ip():
+    """本机局域网 IP（用于发现自己，避免把自己的应答当成别的设备）"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return ""
+
+
+def discover_lan(timeout=0.8):
+    """广播 KV_DISCOVER，收集局域网内的 KeyVoice 设备（手机+电脑）。
+    返回 [(ip, kind, name)]，kind: 'phone' / 'pc'"""
+    found = {}
+    me = my_ip()
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.settimeout(0.15)
+        # 子网定向广播（Windows 常禁止发 255.255.255.255）+ 全网广播双保险
+        me = my_ip()
+        subnet_bc = (me.rsplit(".", 1)[0] + ".255") if me else ""
+        for _ in range(4):
+            try:
+                s.sendto(b"KV_DISCOVER", ("255.255.255.255", 17893))
+            except Exception:
+                pass
+            if subnet_bc:
+                try:
+                    s.sendto(b"KV_DISCOVER", (subnet_bc, 17893))
+                except Exception:
+                    pass
+        end = time.time() + timeout
+        while time.time() < end:
+            try:
+                data, addr = s.recvfrom(256)
+                msg = data.decode("utf-8", "ignore")
+                if addr[0] == me:
+                    continue
+                if msg.startswith("KV_PHONE_HERE:"):
+                    found[addr[0]] = ("phone", msg.split(":", 1)[1])
+                elif msg.startswith("KV_PC_HERE:"):
+                    found.setdefault(addr[0], ("pc", msg.split(":", 1)[1]))
+            except socket.timeout:
+                continue
+            except Exception:
+                break
+        s.close()
+    except Exception:
+        pass
+    return [(ip, k, n) for ip, (k, n) in found.items()]
+
+
+def lan_discover_responder():
+    """应答别的设备的发现广播（PC ↔ PC 互发现）"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("", 17893))
+        s.settimeout(0.5)
+        name = socket.gethostname() or "PC"
+        while True:
+            try:
+                data, addr = s.recvfrom(256)
+                if data.startswith(b"KV_DISCOVER") and addr[0] != my_ip():
+                    out = ("KV_PC_HERE:" + name).encode("utf-8")
+                    s.sendto(out, addr)
             except socket.timeout:
                 continue
             except Exception:
@@ -353,6 +434,8 @@ class Box:
                                  font=FONT_SM, wrap="word", relief="flat",
                                  borderwidth=0, insertbackground=TEXT, padx=8, pady=6)
         self.input_box.pack(fill="x", padx=10, pady=(8, 4))
+        # 回车直接群发（不需要点按钮）
+        self.input_box.bind("<Return>", self._on_return)
         bar = tk.Frame(self.input_frame, bg=SURFACE)
         bar.pack(fill="x", padx=10, pady=(0, 8))
         self._btn(bar, "上屏", self._paste_input, "left")
@@ -442,12 +525,12 @@ class Box:
         threading.Thread(target=run, daemon=True).start()
 
     # ----------------------------------------------------------- 收消息
-    def receive(self, text):
-        self.root.after(0, self._on_receive, text)
+    def receive(self, text, from_name=""):
+        self.root.after(0, self._on_receive, text, from_name)
 
-    def _on_receive(self, text):
+    def _on_receive(self, text, from_name=""):
         self.total += 1
-        msg = {"id": self.total, "text": text, "edited": False}
+        msg = {"id": self.total, "text": text, "from": from_name or "", "edited": False}
         self.messages.append(msg)
         self._render_message(msg)
         self.scroll_to_bottom()
@@ -470,29 +553,41 @@ class Box:
 
     # ----------------------------------------------------------- 消息行渲染
     def _render_message(self, msg):
-        row = tk.Frame(self.list_inner, bg=SURFACE,
-                       highlightbackground=BORDER, highlightthickness=1)
+        """仿微信/QQ 聊天布局：圆头像 + 名称 + 气泡；右侧固定复制/编辑按钮"""
+        who = msg.get("from") or "电脑"
+        row = tk.Frame(self.list_inner, bg=BG)
         row.pack(fill="x", padx=8, pady=4)
-        btns = tk.Frame(row, bg=SURFACE)
-        # 【先 pack 右侧按钮】再 pack 文字：否则窗口变窄时按钮会被 expand 的文字挤没
+        # 【先 pack 右侧按钮】再 pack 头像/气泡：窗口变窄时按钮不会被挤没
+        btns = tk.Frame(row, bg=BG)
         btns.pack(side="right", padx=4, pady=4)
-        label = tk.Label(row, text=msg["text"], bg=SURFACE, fg=TEXT,
-                         font=FONT_SM, anchor="w", justify="left",
-                         wraplength=300, cursor="hand2")
-        label.pack(side="left", fill="both", expand=True, padx=8, pady=8)
         b_copy = tk.Button(btns, text="复制", command=lambda m=msg: self._copy_msg(m),
                            bg=SURFACE_HI, fg=TEXT, activebackground=PRIMARY_PRESS,
                            activeforeground="#FFFFFF", font=FONT_SM, borderwidth=0,
                            relief="flat", padx=8, pady=3,
                            highlightthickness=0, highlightbackground=BORDER)
         b_edit = tk.Button(btns, text="编辑",
-                           command=lambda: self._edit_msg(msg, row, label, b_edit),
-                           bg=SURFACE_HI, fg=TEXT, activebackground=PRIMARY_PRESS,
-                           activeforeground="#FFFFFF", font=FONT_SM, borderwidth=0,
-                           relief="flat", padx=8, pady=3,
-                           highlightthickness=0, highlightbackground=BORDER)
+                           command=lambda: self._edit_msg(msg, row, msg["label"], b_edit))
+        for b in (b_copy, b_edit):
+            b.configure(bg=SURFACE_HI, fg=TEXT, activebackground=PRIMARY_PRESS,
+                        activeforeground="#FFFFFF", font=FONT_SM, borderwidth=0,
+                        relief="flat", padx=8, pady=3,
+                        highlightthickness=0, highlightbackground=BORDER)
         b_copy.pack(side="top", pady=2)
         b_edit.pack(side="top", pady=2)
+        # 圆形头像（取设备名首字）
+        av = tk.Canvas(row, width=36, height=36, bg=BG, highlightthickness=0)
+        av.create_oval(0, 0, 36, 36, fill=PRIMARY, outline="")
+        av.create_text(18, 18, text=who[:1], fill="#FFFFFF", font=FONT_SM)
+        av.pack(side="left", anchor="n", padx=(0, 8), pady=2)
+        # 气泡（设备名小字 + 正文）
+        bubble = tk.Frame(row, bg=SURFACE, highlightbackground=BORDER, highlightthickness=1)
+        bubble.pack(side="left", fill="both", expand=True)
+        tk.Label(bubble, text=who, bg=SURFACE, fg=TEXT3,
+                 font=("Microsoft YaHei", 8)).pack(anchor="w", padx=8, pady=(4, 0))
+        label = tk.Label(bubble, text=msg["text"], bg=SURFACE, fg=TEXT,
+                         font=FONT_SM, anchor="w", justify="left",
+                         wraplength=300, cursor="hand2")
+        label.pack(side="left", fill="both", expand=True, padx=8, pady=8)
 
         msg["row"] = row
         msg["label"] = label
@@ -525,7 +620,7 @@ class Box:
         msg["edited"] = True
         text.pack_forget()
         label.configure(text=new)
-        label.pack(in_=row, side="left", fill="both", expand=True, padx=8, pady=8)
+        label.pack(in_=label.master, side="left", fill="both", expand=True, padx=8, pady=8)
         btn.configure(text="编辑", command=lambda: self._edit_msg(msg, row, label, btn))
         self.toast("已保存修改")
 
@@ -599,29 +694,64 @@ class Box:
     def _clear_input(self):
         self.input_box.delete("1.0", "end")
 
-    # ----------------------------------------------------------- 发到手机
+    # ------------------------------------------------------ 发到多设备（群发）
     def send_to_phone(self):
-        """把输入框内容发到手机端（LanServer 端口 17892）。
-        先试局域网直连（UDP 发现记录的手机 IP），失败则走 adb forward。"""
+        """把输入框内容群发给局域网内所有 KeyVoice 设备（手机+电脑）。
+        UDP 发现优先（17893），未发现的手机走 adb forward 兜底。"""
         text = self.input_box.get("1.0", "end-1c")
         if not text.strip():
             self.toast("输入框为空")
             return
 
         def work():
-            ok, msg = self._post_to_phone(text)
-            self.root.after(0, lambda: self.toast(msg if ok else "发送失败：" + msg))
+            ok, msg = self._send_all(text)
+
+            def done():
+                self.toast(msg)
+                if ok:
+                    self.input_box.delete("1.0", "end")   # 发送成功清空输入框
+
+            self.root.after(0, done)
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _post_to_phone(self, text):
-        body = json.dumps({"text": text}).encode("utf-8")
-        tries = []
-        if PHONE_ADDR["ip"]:
-            tries.append(("http://%s:%d/text" % (PHONE_ADDR["ip"], PHONE_SRV_PORT), False))
-        tries.append(("http://127.0.0.1:%d/text" % PHONE_SRV_PORT, True))   # adb forward 兜底
-        last = "无可用通道"
-        for url, need_adb in tries:
+    def _send_all(self, text):
+        from_name = socket.gethostname() or "PC"
+        body = json.dumps({"text": text, "from": from_name}).encode("utf-8")
+        targets, seen = [], set()
+        for ip, kind, name in discover_lan():
+            if ip in seen:
+                continue
+            seen.add(ip)
+            port = PHONE_SRV_PORT if kind == "phone" else PORT
+            targets.append(("http://%s:%d/text" % (ip, port), name or ip, None))
+        if PHONE_ADDR["ip"] and PHONE_ADDR["ip"] not in seen:
+            seen.add(PHONE_ADDR["ip"])
+            targets.append(("http://%s:%d/text" % (PHONE_ADDR["ip"], PHONE_SRV_PORT),
+                            "手机(记忆)", None))
+        # adb 直连的所有设备：逐台 forward 到不同本地端口（多台手机同时连时也能群发）
+        try:
+            out = subprocess.run(["adb", "devices"], capture_output=True,
+                                 timeout=6).stdout.decode("utf-8", "ignore")
+            i = 0
+            for line in out.splitlines():
+                parts = line.split()
+                if len(parts) >= 2 and parts[1] == "device":
+                    serial = parts[0]
+                    local_port = PHONE_SRV_PORT + 1 + i
+                    subprocess.run(["adb", "-s", serial, "forward",
+                                    "tcp:%d" % local_port, "tcp:%d" % PHONE_SRV_PORT],
+                                   capture_output=True, timeout=6)
+                    url = "http://127.0.0.1:%d/text" % local_port
+                    if url not in [t[0] for t in targets]:
+                        targets.append((url, "adb:" + serial[-4:], None))
+                    i += 1
+        except Exception:
+            pass
+        if not targets:
+            return False, "局域网内没有发现任何 KeyVoice 设备"
+        ok_n, results, last = 0, [], "无可用通道"
+        for url, name, need_adb in targets:
             try:
                 if need_adb:
                     subprocess.run(["adb", "forward", "tcp:%d" % PHONE_SRV_PORT,
@@ -630,13 +760,14 @@ class Box:
                     url, data=body,
                     headers={"Content-Type": "application/json; charset=utf-8"})
                 r = urllib.request.urlopen(req, timeout=2.5)
-                data = json.loads(r.read().decode("utf-8"))
-                if data.get("delivered"):
-                    return True, "已送达手机输入框"
-                return True, "已发到手机（主页面不在前台，回主界面自动显示）"
+                d = json.loads(r.read().decode("utf-8"))
+                ok_n += 1
+                results.append(name if d.get("delivered", True) else name + "(暂存)")
             except Exception as e:
-                last = str(e)
-        return False, last
+                last = "%s: %s" % (name, e)
+        if ok_n == 0:
+            return False, "全部发送失败：" + last
+        return True, "已发给 %d 台设备：%s" % (ok_n, "、".join(results))
 
     def _clear_list(self):
         for m in self.messages:
@@ -698,21 +829,32 @@ class Box:
         if self.docked:
             self.undock()
 
+    def _on_return(self, event):
+        """输入框内按回车 → 群发给所有设备（不换行）"""
+        self.send_to_phone()
+        return "break"
+
     def _poll_hover(self):
-        """贴顶时鼠标悬停在系统标题栏上 → 自动展开（无需点击）。"""
+        """① 贴顶时鼠标悬停系统标题栏 → 自动展开；
+        ② 展开态鼠标在窗口内 → 永不自动折叠（鼠标离开后才开始空闲计时）。"""
         try:
-            if self.docked and not self._peeking:
-                pt = POINT()
-                u32.GetCursorPos(ctypes.byref(pt))
-                x = self.root.winfo_x()
-                y = self.root.winfo_y()
-                w = self.root.winfo_width()
-                h = self.titlebar_h
-                inside = (x <= pt.x <= x + w and y - 2 <= pt.y <= y + h + 8)
-                # 只在“从外面进入”的边沿触发，避免收起瞬间又立刻展开
-                if inside and not self._hover_inside:
-                    self.undock()
-                self._hover_inside = inside
+            pt = POINT()
+            u32.GetCursorPos(ctypes.byref(pt))
+            x = self.root.winfo_x()
+            y = self.root.winfo_y()
+            w = self.root.winfo_width()
+            h = self.root.winfo_height()
+            inside = (x <= pt.x <= x + w and y - 2 <= pt.y <= y + h + 8)
+            if self.docked:
+                if not self._peeking:
+                    tb = self.titlebar_h
+                    dinside = (x <= pt.x <= x + w and y - 2 <= pt.y <= y + tb + 8)
+                    # 只在“从外面进入”的边沿触发，避免收起瞬间又立刻展开
+                    if dinside and not self._hover_inside:
+                        self.undock()
+                    self._hover_inside = dinside
+            elif inside:
+                self._reset_idle()   # 鼠标还在窗口里，保持展开
         except Exception:
             pass
         self.root.after(150, self._poll_hover)
@@ -817,6 +959,8 @@ def main():
     except Exception:
         pass
     threading.Thread(target=udp_listen, args=(PORT,), daemon=True).start()
+    # 应答其它设备的发现广播（多设备互发现）
+    threading.Thread(target=lan_discover_responder, daemon=True).start()
 
     root = tk.Tk()
     app = Box(root, PORT)
