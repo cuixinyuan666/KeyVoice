@@ -8,10 +8,12 @@ import android.graphics.drawable.StateListDrawable;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.ImageButton;
 import android.widget.LinearLayout;
+import android.widget.Spinner;
 import android.widget.TextView;
 
 /**
@@ -39,6 +41,20 @@ public final class Ui {
         return c.getResources().getColor(light ? lightRes : darkRes);
     }
 
+    /**
+     * Activity 使用的 android:theme 资源 id。
+     * <p>
+     * 必须在 {@code super.onCreate()} 之后、构建任何视图之前调用
+     * {@code setTheme(themeRes(light))}。Ui 里的 light 标志只作用于代码创建的视图，
+     * 系统弹层（Spinner 下拉 / AlertDialog / 输入法）只认 Activity 主题，两边必须一起切。
+     */
+    public static int themeRes(boolean lightTheme) {
+        return lightTheme ? R.style.AppTheme_Light : R.style.AppTheme;
+    }
+
+    /** 按当前已设置的主题取 Activity 主题资源 id */
+    public static int themeRes() { return themeRes(light); }
+
     // ---- 颜色 token（对应 res/values/colors.xml）----
     public static int bg(Context c)          { return col(c, R.color.kv_bg, R.color.kvl_bg); }
     public static int surface(Context c)     { return col(c, R.color.kv_surface, R.color.kvl_surface); }
@@ -50,8 +66,16 @@ public final class Ui {
     // 主色不随主题变化，保证品牌一致
     public static int primary(Context c)      { return c.getResources().getColor(R.color.kv_primary); }
     public static int primaryPress(Context c) { return c.getResources().getColor(R.color.kv_primary_press); }
-    public static int primaryDim(Context c)   { return c.getResources().getColor(R.color.kv_primary_dim); }
     public static int accent(Context c)       { return c.getResources().getColor(R.color.kv_accent); }
+
+    /**
+     * 主色的「低强度」版本：用作按钮按下态 / 次要高亮底色。
+     * 必须随主题切换 —— 深色下是深蓝，浅色下是浅蓝，否则白底上会糊成一块深色。
+     */
+    public static int primaryDim(Context c)   { return col(c, R.color.kv_primary_dim, R.color.kvl_primary_dim); }
+
+    /** 主色底上的前景色（图标 / 文字）。主色恒为品牌蓝，两主题下都用白色最清晰。 */
+    public static int onPrimary(Context c)    { return Color.WHITE; }
     public static int success(Context c)      { return c.getResources().getColor(R.color.kv_success); }
     public static int warning(Context c)      { return c.getResources().getColor(R.color.kv_warning); }
     public static int error(Context c)        { return c.getResources().getColor(R.color.kv_error); }
@@ -174,6 +198,41 @@ public final class Ui {
         return t;
     }
 
+    // ---------------------------------------------------------------- 下拉框
+    //
+    // 系统自带的 simple_spinner_dropdown_item 使用系统主题色（通常是白底黑字），
+    // 在深色卡片里弹出会非常刺眼。这里统一给出「跟随当前主题」的适配器与边框，
+    // 让设置页的下拉与卡片、输入框保持同一套配色。
+
+    /** 主题化的下拉适配器：收起态与展开态都用当前主题的底色与文字色 */
+    public static ArrayAdapter<String> spinnerAdapter(Context c, String[] items) {
+        return new ArrayAdapter<String>(c, android.R.layout.simple_spinner_item, items) {
+            @Override
+            public View getView(int pos, View cv, ViewGroup parent) {
+                TextView t = (TextView) super.getView(pos, cv, parent);
+                t.setTextColor(text(c));
+                t.setBackgroundColor(surfaceHi(c));
+                return t;
+            }
+
+            @Override
+            public View getDropDownView(int pos, View cv, ViewGroup parent) {
+                TextView t = (TextView) super.getDropDownView(pos, cv, parent);
+                t.setTextColor(text(c));
+                t.setBackgroundColor(surfaceHi(c));
+                int p = dp(c, 12);
+                t.setPadding(p, p, p, p);
+                return t;
+            }
+        };
+    }
+
+    /** 给 Spinner 套上与输入框一致的圆角边框（需在 setAdapter 之后调用） */
+    public static void styleSpinner(Context c, Spinner sp) {
+        sp.setBackground(round(surfaceHi(c), border(c), 1, dp(c, 10)));
+        sp.setPadding(dp(c, 8), dp(c, 6), dp(c, 8), dp(c, 6));
+    }
+
     public static EditText inputField(Context c, String hint) {
         EditText e = new EditText(c);
         e.setHint(hint);
@@ -231,7 +290,7 @@ public final class Ui {
         b.setText(label);
         b.setTextSize(15);
         b.setTypeface(null, Typeface.BOLD);
-        b.setTextColor(Color.WHITE);
+        b.setTextColor(onPrimary(c));
         b.setBackground(buttonBg(primary(c), primaryPress(c), dp(c, 10)));
         b.setMinHeight(dp(c, 48));
         b.setPadding(dp(c, 16), 0, dp(c, 16), 0);
@@ -243,7 +302,7 @@ public final class Ui {
         b.setText(label);
         b.setTextSize(15);
         b.setTypeface(null, Typeface.BOLD);
-        b.setTextColor(Color.WHITE);
+        b.setTextColor(onPrimary(c));
         b.setBackground(buttonBg(accent(c), Color.parseColor("#0FBBD6"), dp(c, 10)));
         b.setMinHeight(dp(c, 48));
         b.setPadding(dp(c, 16), 0, dp(c, 16), 0);
@@ -283,7 +342,7 @@ public final class Ui {
     public static ImageButton iconButton(Context c, int iconRes, int bgColor, int diameterDp) {
         ImageButton b = new ImageButton(c);
         b.setImageResource(iconRes);
-        b.setColorFilter(Color.WHITE);
+        b.setColorFilter(onPrimary(c));
         b.setScaleType(ImageButton.ScaleType.CENTER_INSIDE);
         b.setBackground(buttonBg(bgColor, shade(bgColor, -0.28f), (float) dp(c, diameterDp) / 2f));
         int pad = dp(c, Math.max(8, diameterDp / 4));

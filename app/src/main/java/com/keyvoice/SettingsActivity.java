@@ -41,7 +41,8 @@ public class SettingsActivity extends Activity {
 
     private Config cfg;
     private EditText etHost, etPort;
-    private TextView tvInfo, tvAdbHint;
+    private EditText etDeviceName;
+    private TextView tvInfo, tvAdbHint, tvLanInfo;
     private Spinner spEngine, spAction;
     private Spinner spTheme, spTextColor, spFont, spFontSize;
     private RadioGroup rgMode, rgTrans;
@@ -57,11 +58,16 @@ public class SettingsActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        cfg = new Config(this);
+        // 主题：必须在构建任何视图之前设置（理由同 MainActivity）。
+        // 本页有大量系统控件（Spinner 下拉、AlertDialog、CheckBox/RadioButton 着色），
+        // 少了 setTheme() 就只有深色一套，切换到浅色主题时这些控件仍然是深色。
+        setTheme(Ui.themeRes("light".equalsIgnoreCase(cfg.theme())));
+        Ui.setTheme(cfg.theme());
         // 方向：只允许竖屏/翻转竖屏，永不横屏（与主页面一致）
-        setRequestedOrientation(new Config(this).invertMode()
+        setRequestedOrientation(cfg.invertMode()
                 ? android.content.pm.ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT
                 : android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
-        cfg = new Config(this);
 
         ScrollView sv = new ScrollView(this);
         LinearLayout root = Ui.rootScroll(this);
@@ -69,6 +75,8 @@ public class SettingsActivity extends Activity {
         setContentView(sv);
 
         root.addView(Ui.appBar(this, "KeyVoice · 设置"));
+
+        root.addView(buildDeviceCard());
 
         // ---- 传输方式 ----
         LinearLayout c1 = Ui.sectionCard(this);
@@ -86,10 +94,10 @@ public class SettingsActivity extends Activity {
         rgTrans.setOnCheckedChangeListener((g, id) -> applyTransport());
         root.addView(c1);
 
-        // ---- 电脑地址 ----
+        // ---- 设备地址 ----
         LinearLayout c2 = Ui.sectionCard(this);
-        c2.addView(Ui.sectionTitle(this, "电脑地址"));
-        etHost = Ui.inputField(this, "电脑局域网 IP，如 192.168.1.5（仅局域网模式用）");
+        c2.addView(Ui.sectionTitle(this, "设备地址"));
+        etHost = Ui.inputField(this, "设备局域网 IP，如 192.168.1.5（仅局域网模式用）");
         etHost.setText(cfg.host());
         etHost.setSingleLine(true);
         c2.addView(etHost);
@@ -102,9 +110,8 @@ public class SettingsActivity extends Activity {
         etPort.setLayoutParams(plp);
         c2.addView(etPort);
         LinearLayout row1 = Ui.row(this);
-        btnScan = Ui.ghostButton(this, "搜索电脑"); btnScan.setOnClickListener(v -> scanPc());
         Button bTest = Ui.ghostButton(this, "测试发送"); bTest.setOnClickListener(v -> testSend());
-        addWeighted(row1, btnScan, bTest);
+        addWeighted(row1, bTest);
         c2.addView(row1);
         root.addView(c2);
 
@@ -133,7 +140,7 @@ public class SettingsActivity extends Activity {
         spAction = new Spinner(this);
         styleSpinner(spAction);
         String[] acts = {"有输入光标就上屏，没光标就存剪贴板", "只显示在悬浮框/存入剪贴板，不上屏"};
-        spAction.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, acts));
+        spAction.setAdapter(Ui.spinnerAdapter(this, acts));
         spAction.setSelection("copy".equals(cfg.action()) ? 1 : 0);
         c4.addView(spAction);
         root.addView(c4);
@@ -276,6 +283,68 @@ public class SettingsActivity extends Activity {
         refresh();
     }
 
+    // ------------------------------------------------------- 设备（名称 / 发现）
+
+    /** 最近一次扫描到的设备列表（主线程访问） */
+    private final java.util.List<Discover.Device> lanDevices = new java.util.ArrayList<>();
+
+    /**
+     * 「设备」卡片：本机名称可改（会广播给局域网其它终端），下方显示发现到的设备数量与列表。
+     * <p>
+     * 放在最上面：设备身份是所有连接行为的前提，先确认「我是谁、对面有几台」再配地址。
+     */
+    private LinearLayout buildDeviceCard() {
+        LinearLayout c = Ui.sectionCard(this);
+        c.addView(Ui.sectionTitle(this, "设备"));
+
+        c.addView(Ui.body(this, "本机名称（同一局域网内的其它设备会看到这个名字）"));
+        etDeviceName = Ui.inputField(this, Config.defaultDeviceName());
+        etDeviceName.setText(cfg.effDeviceName());
+        etDeviceName.setSingleLine(true);
+        c.addView(etDeviceName);
+
+        LinearLayout row = Ui.row(this);
+        btnScan = Ui.ghostButton(this, "搜索设备");
+        btnScan.setOnClickListener(v -> scanPc());
+        addWeighted(row, btnScan);
+        c.addView(row);
+
+        // 设备清单：数量 + 每台的名称与 IP。点电脑即连接，点手机仅提示（手机不做发送目标）。
+        // 搜不到设备时的排查提示也写在这里（refreshLanInfo），保证用户一眼能看到。
+        tvLanInfo = Ui.body(this, "");
+        tvLanInfo.setOnClickListener(v -> scanPc());
+        c.addView(tvLanInfo);
+
+        c.addView(Ui.caption(this, "搜索会向局域网广播发现请求，所有运行中的 KeyVoice 终端（电脑和手机）都会应答。点击上方清单可重新搜索。"));
+
+        refreshLanInfo();   // 立即给出初始提示，避免这块在首帧是空白
+        return c;
+    }
+
+    /**
+     * 刷新「发现 N 台设备」这一行（设备清单：名称 + 类型 + IP）。
+     * <p>
+     * 一台都没搜到时【就地】给出排查提示：设置页很长，把提示放在页尾（tvInfo）
+     * 用户根本看不到，必须显示在他正在看的地方。
+     */
+    private void refreshLanInfo() {
+        if (tvLanInfo == null) return;
+        if (lanDevices.isEmpty()) {
+            tvLanInfo.setText("未发现设备\n"
+                    + "若「电脑能搜到你、你却搜不到电脑」，多半是电脑防火墙没放行：\n"
+                    + "在电脑上双击 pc/allow_firewall.bat，弹窗点「是」即可。");
+            return;
+        }
+        StringBuilder sb = new StringBuilder("发现 ").append(lanDevices.size()).append(" 台设备：\n");
+        for (int i = 0; i < lanDevices.size(); i++) {
+            Discover.Device d = lanDevices.get(i);
+            sb.append("· ").append(d.label())
+              .append("（").append(d.typeLabel()).append(" · ").append(d.ip).append("）");
+            if (i < lanDevices.size() - 1) sb.append('\n');
+        }
+        tvLanInfo.setText(sb.toString());
+    }
+
     // ------------------------------------------------------- 权限自动跳转
 
     private boolean micGranted() {
@@ -336,9 +405,9 @@ public class SettingsActivity extends Activity {
         try { rb.setButtonTintList(ColorStateList.valueOf(Ui.primary(this))); } catch (Exception ignored) { }
     }
 
+    /** 统一走设计系统：下拉项的底色/文字色跟随当前主题（系统默认样式是白底，深色下会突兀） */
     private void styleSpinner(Spinner sp) {
-        sp.setBackground(Ui.round(Ui.surfaceHi(this), Ui.border(this), 1, Ui.dp(this, 10)));
-        sp.setPadding(Ui.dp(this, 8), Ui.dp(this, 6), Ui.dp(this, 8), Ui.dp(this, 6));
+        Ui.styleSpinner(this, sp);
     }
 
     private CheckBox check(String t, boolean v) {
@@ -370,9 +439,7 @@ public class SettingsActivity extends Activity {
     /** 统一风格的 Spinner（下拉选中项用于外观设置） */
     private Spinner spinner(String[] labels, int sel) {
         Spinner s = new Spinner(this);
-        ArrayAdapter<String> ad = new ArrayAdapter<>(this,
-                android.R.layout.simple_spinner_dropdown_item, labels);
-        s.setAdapter(ad);
+        s.setAdapter(Ui.spinnerAdapter(this, labels));
         if (sel >= 0 && sel < labels.length) s.setSelection(sel);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -419,11 +486,12 @@ public class SettingsActivity extends Activity {
         String port = etPort.getText().toString().trim();
         if (port.isEmpty()) port = String.valueOf(cfg.port());
         tvAdbHint.setText(adb
-                ? "电脑端先执行一次（手机插着 USB）：\n  adb reverse tcp:" + port + " tcp:" + port + "\n然后手机就能发到电脑，全程不走局域网。"
+                ? "电脑端先执行一次（手机插着 USB）：\n  adb reverse tcp:" + port + " tcp:" + port
+                  + "\n然后手机就能发到电脑，全程不走局域网。"
                 : "局域网模式：手机与电脑要在同一个 WiFi。");
-        // 选了局域网且还没连上：自动搜索并连接电脑
+        // 选了局域网且还没连上：自动搜索并连接设备
         if (!adb && cfg.host().isEmpty()) {
-            tvInfo.setText("局域网模式：正在自动搜索电脑…");
+            tvInfo.setText("局域网模式：正在自动搜索设备…");
             etPort.postDelayed(this::scanPc, 600);
         }
     }
@@ -452,7 +520,8 @@ public class SettingsActivity extends Activity {
                 engineComps.add(cn.flattenToString());
             }
         }
-        spEngine.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, engineLabels));
+        spEngine.setAdapter(Ui.spinnerAdapter(this,
+                engineLabels.toArray(new String[0])));
 
         int sel = 0;
         String saved = cfg.srComponent();
@@ -461,47 +530,86 @@ public class SettingsActivity extends Activity {
         spEngine.setSelection(Math.min(sel, engineLabels.size() - 1));
     }
 
+    /** 用户点「搜索设备」：扫描后弹窗让选一台（只有一台就直接连） */
     private void scanPc() {
-        boolean vpn = Discover.vpnActive();
-        tvInfo.setText(vpn
-                ? "⚠ 检测到 VPN 已开启，可能拦截局域网发现。正在搜索（4 秒）…"
-                : "正在搜索电脑（4 秒）…");
-        final List<String> found = new ArrayList<>();
+        runScan(true);
+    }
+
+    /** 静默刷新：只更新「发现 N 台设备」这一行，不弹窗、不自动改连接目标 */
+    private void refreshDeviceList() {
+        runScan(false);
+    }
+
+    private void runScan(final boolean interactive) {
+        if (interactive) {
+            // 静默刷新（进页面自动扫）不动 tvInfo：那一行常驻显示服务状态，别被搜索提示盖掉
+            boolean vpn = Discover.vpnActive();
+            tvInfo.setText(vpn
+                    ? "⚠ 检测到 VPN 已开启，可能拦截局域网发现。正在搜索设备（4 秒）…"
+                    : "正在搜索设备（4 秒）…");
+            btnScan.setEnabled(false);
+            btnScan.setText("搜索中…");
+        }
+        lanDevices.clear();
+        if (tvLanInfo != null) tvLanInfo.setText("正在搜索设备…");
+
         Discover.scan(this, 4000, new Discover.Sink() {
-            @Override public void onFound(final String ip, final int port) {
-                runOnUiThread(() -> found.add(ip + ":" + port));
+            @Override public void onFound(final Discover.Device d) {
+                runOnUiThread(() -> {
+                    lanDevices.add(d);
+                    refreshLanInfo();
+                });
             }
 
-            @Override public void onDone(final int count) {
+            @Override public void onDone(final List<Discover.Device> all) {
                 runOnUiThread(() -> {
-                    if (count == 0) {
-                        tvInfo.setText("没搜到。确认：①电脑已运行接收端；②同一 WiFi；③电脑防火墙放行 17890/17891"
-                                + (Discover.vpnActive() ? "；④临时关闭 VPN 再试（VPN 会拦截广播）" : "。"));
+                    if (interactive) {
+                        btnScan.setEnabled(!cfg.adbMode());
+                        btnScan.setText("搜索设备");
+                    }
+                    lanDevices.clear();
+                    lanDevices.addAll(all);
+                    refreshLanInfo();
+                    if (!interactive) return;      // 静默刷新到此为止
+                    if (all.isEmpty()) {
+                        // 最容易踩、也最容易被误判成 bug 的坑：电脑防火墙没放行。
+                        // 症状是单向不通 —— 电脑能搜到手机（出去的广播+收回的应答都放行），
+                        // 手机却搜不到电脑（手机发的广播被防火墙丢掉）。所以这里直接把病根说清楚。
+                        tvInfo.setText("没搜到设备。若「电脑能搜到你、你却搜不到电脑」，"
+                                + "基本就是电脑防火墙没放行：在电脑上双击 pc/allow_firewall.bat，"
+                                + "在弹窗点「是」即可。另请确认手机与电脑在同一 WiFi"
+                                + (Discover.vpnActive() ? "；检测到 VPN 已开启，它会拦截广播，建议临时关闭再试。" : "。"));
                         return;
                     }
-                    String[] items = found.toArray(new String[0]);
-                    if (items.length == 1) {
-                        connectTo(items[0]);
-                    } else {
-                        new AlertDialog.Builder(SettingsActivity.this)
-                                .setTitle("选择电脑")
-                                .setItems(items, (d, which) -> connectTo(items[which]))
-                                .show();
+                    if (all.size() == 1) {
+                        connectTo(all.get(0));
+                        return;
                     }
+                    String[] items = new String[all.size()];
+                    for (int i = 0; i < all.size(); i++) items[i] = all.get(i).toString();
+                    new AlertDialog.Builder(SettingsActivity.this)
+                            .setTitle("发现 " + all.size() + " 台设备")
+                            .setItems(items, (d, which) -> connectTo(all.get(which)))
+                            .show();
                 });
             }
         });
     }
 
-    private void connectTo(String s) {
-        String[] sp = s.split(":");
-        etHost.setText(sp[0]);
-        if (sp.length > 1) etPort.setText(sp[1]);
+    /** 选中一台设备后：填入地址 → 切局域网模式 → 保存 → 探测连通性 */
+    private void connectTo(Discover.Device d) {
+        if (!d.isPc()) {
+            // 手机之间暂不互发，只展示；后续若要手机→手机，可在此接上 17892 的 /text
+            tvInfo.setText(d.label() + " 是手机，暂不支持直接发送（仅列表展示）");
+            return;
+        }
+        etHost.setText(d.ip);
+        etPort.setText(String.valueOf(d.port));
         rgTrans.check(11);          // 切到局域网模式
         applyTransport();
         save();
-        tvInfo.setText("已锁定 " + s + "，正在测试连接…");
-        final String target = s;
+        String target = d.label() + " " + d.ip + ":" + d.port;
+        tvInfo.setText("已锁定 " + target + "，正在测试连接…");
         Sender.ping(this, (ok, msg) -> tvInfo.setText(ok
                 ? "已自动连接：" + target + "（收到文字将直接上屏到电脑光标处）"
                 : "已填 " + target + " 但连不通：" + msg
@@ -533,6 +641,12 @@ public class SettingsActivity extends Activity {
         cfg.keepScreen(cbKeepScreen.isChecked());
         cfg.autoClose(cbAutoClose.isChecked());
         cfg.addNewline(cbNewline.isChecked());
+        // ---- 设备名（广播给局域网其它终端，立即生效）----
+        if (etDeviceName != null) {
+            cfg.deviceName(etDeviceName.getText().toString().trim());
+            LanServer.setDeviceName(cfg.effDeviceName());
+            if (etDeviceName.length() == 0) etDeviceName.setHint(Config.defaultDeviceName());
+        }
         // ---- 外观（均写入 SharedPreferences，App 关闭后依然保留）----
         cfg.theme(Ui.THEME_VALUES[safePos(spTheme, 0)]);
         int ci = safePos(spTextColor, 0);
@@ -560,5 +674,7 @@ public class SettingsActivity extends Activity {
     protected void onResume() {
         super.onResume();
         refresh();
+        // 设置页也要显示实时的设备数量：进页面静默扫一次（只更新清单，不弹窗）
+        refreshDeviceList();
     }
 }

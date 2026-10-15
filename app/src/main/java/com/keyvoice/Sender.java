@@ -27,6 +27,8 @@ public class Sender {
         final String host = cfg.adbMode() ? "127.0.0.1" : cfg.host();
         final int port = cfg.port();
         final String action = cfg.action();
+        // 带上本机设备名：电脑端的消息列表就能显示「来自 张三的手机」而不是一串 IP
+        final String from = cfg.effDeviceName();
 
         POOL.execute(() -> {
             boolean ok = false;
@@ -44,6 +46,7 @@ public class Sender {
 
                 String body = "{\"text\":" + json(text)
                         + ",\"action\":\"" + action + "\""
+                        + ",\"from\":" + json(from)
                         + ",\"ts\":" + System.currentTimeMillis() + "}";
                 byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
                 conn.setFixedLengthStreamingMode(bytes.length);
