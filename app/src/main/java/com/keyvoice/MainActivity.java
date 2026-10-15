@@ -107,7 +107,6 @@ public class MainActivity extends Activity {
     private View chatShield;               // 调节态触摸拦截层
     private LinearLayout chatTuner;        // 聊天调节工具条
     private TextView chatHeader;           // 面板头部：本机名 + 同局域网设备数量
-    private Runnable peerListener;         // 设备数变化回调（退出时摘除）
     private boolean chatAdjustActive = false;
     private boolean chatReanchor = false;
     private float chatLastX = 0, chatLastY = 0;
@@ -175,7 +174,12 @@ public class MainActivity extends Activity {
         cfg = new Config(this);
         // 方向：默认跟随系统，只有用户显式开启「倒置显示」时才锁定 reversePortrait
         applyOrientation();
-        // 主题：来自 Config 持久化，必须在构建任何视图之前设置，颜色 token 才会取对色板
+        // 主题：来自 Config 持久化，必须在构建任何视图之前设置。
+        // 分两步，缺一不可：
+        //   ① setTheme(res)  → 决定系统弹层（AlertDialog / Spinner 下拉 / 输入法）的配色
+        //   ② Ui.setTheme(v) → 决定本页代码创建的视图取哪套颜色 token
+        // 只做 ② 会导致「页面是浅色、弹窗还是深色」，也就是主题不统一。
+        setTheme(Ui.themeRes("light".equalsIgnoreCase(cfg.theme())));
         Ui.setTheme(cfg.theme());
 
         // 根用 FrameLayout：内容垂直排列 + 一个左侧竖排提示层（不挡按钮）
@@ -233,7 +237,8 @@ public class MainActivity extends Activity {
 
         arrow = new ImageView(this);
         arrow.setImageResource(R.drawable.ic_arrow);
-        arrow.setColorFilter(Color.WHITE);
+        // 箭头画在页面背景上，必须跟随主题文字色：浅色主题下白色箭头会完全看不见
+        arrow.setColorFilter(Ui.text(this));
         arrow.setRotation(45f); // 指向右下（设置齿轮方向）
         arrow.setContentDescription("无障碍未开启，点此去设置");
         arrow.setOnClickListener(v -> {
@@ -287,6 +292,36 @@ public class MainActivity extends Activity {
         va.setRepeatMode(ValueAnimator.REVERSE);
         va.addUpdateListener(a -> arrow.setTranslationY((Float) a.getAnimatedValue() * Ui.dp(this, 8)));
         va.start();
+
+        // ---- 设备条：本机名称 + 局域网设备数量（点击可重新搜索并查看清单）----
+        LinearLayout devBar = new LinearLayout(this);
+        devBar.setOrientation(LinearLayout.HORIZONTAL);
+        devBar.setGravity(Gravity.CENTER_VERTICAL);
+        devBar.setBackground(Ui.round(Ui.surface(this), Ui.border(this), 1, Ui.dp(this, 10)));
+        devBar.setPadding(Ui.dp(this, 10), Ui.dp(this, 5), Ui.dp(this, 10), Ui.dp(this, 5));
+        LinearLayout.LayoutParams dbLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        dbLp.bottomMargin = Ui.dp(this, 8);
+        devBar.setLayoutParams(dbLp);
+
+        tvDevName = new TextView(this);
+        tvDevName.setTextSize(13);
+        tvDevName.setTypeface(null, android.graphics.Typeface.BOLD);
+        tvDevName.setTextColor(Ui.text(this));
+        tvDevName.setSingleLine(true);
+        tvDevName.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        tvDevName.setLayoutParams(new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        devBar.addView(tvDevName);
+
+        tvDevCount = new TextView(this);
+        tvDevCount.setTextSize(12);
+        tvDevCount.setTextColor(Ui.text3(this));
+        tvDevCount.setSingleLine(true);
+        devBar.addView(tvDevCount);
+
+        devBar.setOnClickListener(v -> showDeviceList());
+        content.addView(devBar);
 
         content.addView(inputWrap);
 
@@ -394,7 +429,8 @@ public class MainActivity extends Activity {
         // ---- 聊天面板：PC 发来的消息显示在这里（仿聊天布局），把手可进入调节 ----
         chatWrap = new LinearLayout(this);
         chatWrap.setOrientation(LinearLayout.VERTICAL);
-        chatWrap.setBackground(Ui.round(0xE6161A21, Ui.border(this), 1, Ui.dp(this, 12)));
+        // 用 token 而不是写死深色值：浅色主题下写死的深色会变成一块突兀的黑斑
+        chatWrap.setBackground(Ui.round(Ui.surface(this), Ui.border(this), 1, Ui.dp(this, 12)));
         FrameLayout.LayoutParams chatLp = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, Ui.dp(this, 320),
                 Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
@@ -550,8 +586,8 @@ public class MainActivity extends Activity {
         tip = new TextView(this);
         tip.setTextSize(15);
         tip.setTypeface(null, android.graphics.Typeface.BOLD);
-        // 深色主题下提示底是深色 -> 用白字；浅色主题提示底是白色 -> 跟随主题文字色
-        tip.setTextColor(Ui.isLight() ? Ui.text(this) : Color.WHITE);
+        // 提示底是 surface_hi（跟随主题），文字统一取主题主文字色即可保证对比度
+        tip.setTextColor(Ui.text(this));
         tip.setGravity(Gravity.CENTER);
         tip.setMaxWidth(Ui.dp(this, 72));
         tip.setBackground(Ui.round(Ui.surfaceHi(this), Ui.border(this), 1, Ui.dp(this, 12)));
@@ -662,22 +698,95 @@ public class MainActivity extends Activity {
 
         // PC → 手机：启动局域网接收服务（端口 17892）。
         // 消息进聊天面板（来源名 + 头像），不再写入输入框。
-        LanServer.start((text, from) -> postPcMessage(text, from));
+        // 传入 Context 是为了发现应答时带上用户在设置里改过的设备名。
+        LanServer.start(this, (text, from) -> postPcMessage(text, from));
 
-        // 手机间互发现 + 群发：启动发现（含本机名），挂设备数刷新回调
-        PeerManager.get().setName(cfg.deviceName());
-        PeerManager.get().start(this);
-        peerListener = this::updatePeerHeader;
-        PeerManager.get().addListener(peerListener);
-        updatePeerHeader();
+        // 进入主页面先刷新一次局域网设备清单（本机名 + 设备数量）
+        refreshLanDevices();
     }
 
-    /** 刷新聊天面板头部的「本机名 + 同局域网设备数量」 */
-    private void updatePeerHeader() {
-        if (chatHeader == null) return;
-        int total = PeerManager.get().totalCount();
-        String name = PeerManager.get().name();
-        chatHeader.setText("本机 " + name + " ｜ 局域网在线 " + total + " 台（含本机）");
+    // ------------------------------------------------------- 设备清单（名称 / 数量）
+
+    /** 最近一次扫描到的局域网设备（仅主线程访问） */
+    private final java.util.List<Discover.Device> lanDevices = new java.util.ArrayList<>();
+    /** 扫描代号：每次发起扫描自增，用来丢弃过期扫描的回调（防并发扫描串数据） */
+    private int scanSeq = 0;
+    /** 设备条文本：「本机名称 · 发现 N 台设备」 */
+    private TextView tvDevName, tvDevCount;
+
+    /** 静默刷新设备清单（无回调） */
+    private void refreshLanDevices() {
+        refreshLanDevices(null);
+    }
+
+    /**
+     * 重新扫描局域网，刷新设备条上的【本机名称 + 设备数量】。
+     * 只做统计展示，不自动改连接目标（自动连接另有 autoLanConnect 负责）。
+     *
+     * @param after 扫描结束后的回调（在主线程执行），可为 null
+     */
+    private void refreshLanDevices(final Runnable after) {
+        if (tvDevCount != null) tvDevCount.setText("正在搜索设备…");
+        lanDevices.clear();
+        final int mySeq = ++scanSeq;
+        Discover.scan(this, 3000, new Discover.Sink() {
+            @Override public void onFound(Discover.Device d) {
+                if (mySeq != scanSeq) return;      // 过期扫描的结果直接丢弃
+                runOnUiThread(() -> {
+                    if (mySeq != scanSeq) return;
+                    lanDevices.add(d);
+                    refreshDeviceBar();
+                });
+            }
+
+            @Override public void onDone(java.util.List<Discover.Device> all) {
+                if (mySeq != scanSeq) return;
+                runOnUiThread(() -> {
+                    if (mySeq != scanSeq) return;
+                    lanDevices.clear();
+                    lanDevices.addAll(all);
+                    refreshDeviceBar();
+                    if (after != null) after.run();
+                });
+            }
+        });
+    }
+
+    /** 把【本机名称 + 设备数量】写到设备条上 */
+    private void refreshDeviceBar() {
+        if (tvDevName == null || tvDevCount == null) return;
+        tvDevName.setText(cfg.effDeviceName());
+        int n = lanDevices.size();
+        tvDevCount.setText(n > 0 ? ("发现 " + n + " 台设备") : "未发现设备");
+        // 本地聊天面板的标题行同步显示同样的信息（保持两处一致）
+        if (chatHeader != null) {
+            chatHeader.setText(cfg.effDeviceName()
+                    + (n > 0 ? (" ｜ 局域网 " + n + " 台设备") : " ｜ 未发现设备"));
+        }
+    }
+
+    /** 点击设备条：重新搜索并弹窗列出每台设备的名称与类型 */
+    private void showDeviceList() {
+        refreshLanDevices(() -> {
+            StringBuilder sb = new StringBuilder();
+            sb.append("本机：").append(cfg.effDeviceName()).append("\n\n");
+            if (lanDevices.isEmpty()) {
+                sb.append("暂未发现其它设备。\n")
+                  .append("若「电脑能搜到你、你却搜不到电脑」，那是电脑防火墙没放行：\n")
+                  .append("在电脑上双击 pc\\allow_firewall.bat，弹窗点「是」即可。\n")
+                  .append("另请确认双方在同一 WiFi、对方已运行 KeyVoice。");
+            } else {
+                for (Discover.Device d : lanDevices) {
+                    sb.append("· ").append(d.label())
+                      .append("（").append(d.typeLabel()).append(" · ").append(d.ip).append("）\n");
+                }
+            }
+            new AlertDialog.Builder(this)
+                    .setTitle("设备清单（发现 " + lanDevices.size() + " 台）")
+                    .setMessage(sb.toString())
+                    .setPositiveButton("关闭", null)
+                    .show();
+        });
     }
 
     /** PC → 手机：把电脑发来的文字插入输入框光标处 + 存剪贴板 + 提示 */
@@ -813,8 +922,10 @@ public class MainActivity extends Activity {
         inputReanchor = true;   // 进入调节态后第一次移动先做锚点校准，避免输入框瞬移
         tuner.setVisibility(View.VISIBLE);
         tuner.bringToFront();
-        // 3dp 亮青色描边 + 微弱青色底，调节态下清晰可见（原来 2dp 蓝色太淡）
-        inputWrap.setBackground(Ui.round(0x3322D3EE, Ui.accent(this), 3, Ui.dp(this, 12)));
+        // 3dp 亮青色描边 + 微弱青色底，调节态下清晰可见（原来 2dp 蓝色太淡）。
+        // 底色由 accent 取 20% alpha 得到，深浅主题下都保持一致的高亮语义。
+        int acc = Ui.accent(this);
+        inputWrap.setBackground(Ui.round((acc & 0x00FFFFFF) | 0x33000000, acc, 3, Ui.dp(this, 12)));
         overlay.setVisibility(View.GONE);
         showCenterTip("调节模式：拖动移动 · 面板可颠倒/缩放/复位");
     }
@@ -1159,7 +1270,7 @@ public class MainActivity extends Activity {
         avatar.setGravity(Gravity.CENTER);
         avatar.setTextSize(14);
         avatar.setTypeface(null, android.graphics.Typeface.BOLD);
-        avatar.setTextColor(Color.WHITE);
+        avatar.setTextColor(Ui.onPrimary(this));
         avatar.setText(who.substring(0, 1));
         avatar.setBackground(Ui.buttonBg(Ui.primary(this), Ui.primaryPress(this), as / 2f));
         row.addView(avatar);
@@ -1412,9 +1523,9 @@ public class MainActivity extends Activity {
         lastSent = text;
         String finalText = text;
 
-        // 手机互发：把同一条消息广播给同局域网所有对端，并在本机聊天面板也显示（便于查看对话）
-        final String myName = cfg.deviceName();
-        PeerManager.get().broadcast(finalText, myName);
+        // 本机聊天面板也显示这条（便于对照电脑端收到的内容）。
+        // 注：v0.3.16 起手机之间不再互发文字（只连电脑），所以这里没有对端广播了。
+        final String myName = cfg.effDeviceName();
         runOnUiThread(() -> renderChatMessage(myName, finalText));
 
         // 发送后「清空输入框」保护窗口：讯飞整句修正常在松开后 1~3 秒才把整句写回框里，
@@ -1461,9 +1572,21 @@ public class MainActivity extends Activity {
         updatePauseIcon();
     }
 
+    /** 设备清单定时刷新间隔（毫秒）。只在主页面前台时跑，退到后台立刻停，避免空耗。 */
+    private static final long DEV_REFRESH_MS = 20000L;
+
+    private final Runnable devRefresh = new Runnable() {
+        @Override public void run() {
+            refreshLanDevices(null);
+            h.postDelayed(this, DEV_REFRESH_MS);
+        }
+    };
+
     @Override
     protected void onResume() {
         super.onResume();
+        // 从设置页返回时，设备名可能刚改过，这里重新读一次
+        refreshDeviceBar();
         refreshStatus();
         if (onboardingActive && onboardWaitingReturn) {
             onboardWaitingReturn = false;
@@ -1479,6 +1602,9 @@ public class MainActivity extends Activity {
             cfg.layoutResetRequested(false);
             resetAllLayout();
         }
+        // 前台时定时刷新局域网设备数量
+        h.removeCallbacks(devRefresh);
+        h.postDelayed(devRefresh, DEV_REFRESH_MS);
         // 回到主页面：补投暂存的电脑消息
         if (pendingPcMessage != null) {
             String[] p = pendingPcMessage;
@@ -1490,6 +1616,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onPause() {
         super.onPause();
+        h.removeCallbacks(devRefresh);   // 后台不再扫网
         if (resumed == this) resumed = null;
     }
 
@@ -1512,23 +1639,31 @@ public class MainActivity extends Activity {
         if (accOk) cfg.onboarded(true);
     }
 
-    /** 局域网模式未连接时，自动搜索并连接第一台发现的电脑 */
+    /**
+     * 局域网模式未连接时，自动搜索并连接第一台发现的【电脑】。
+     * 只连电脑：手机之间暂不互发文字，避免出现「连上了但发不出去」。
+     */
     private void autoLanConnect() {
         final boolean[] done = {false};
         Discover.scan(this, 4000, new Discover.Sink() {
             @Override
-            public void onFound(String ip, int port) {
-                if (done[0]) return;
+            public void onFound(Discover.Device d) {
+                if (done[0] || !d.isPc()) return;
                 done[0] = true;
-                cfg.host(ip);
-                cfg.port(port);
-                runOnUiThread(() -> showCenterTip("已自动连接到 " + ip + ":" + port));
+                cfg.host(d.ip);
+                cfg.port(d.port);
+                runOnUiThread(() -> showCenterTip(
+                        "已自动连接到 " + d.label() + " " + d.ip + ":" + d.port));
             }
 
             @Override
-            public void onDone(int count) {
-                if (!done[0]) runOnUiThread(() ->
-                        showCenterTip("局域网未找到电脑；去「设置」手动搜索"));
+            public void onDone(java.util.List<Discover.Device> all) {
+                lanDevices.clear();
+                lanDevices.addAll(all);
+                runOnUiThread(() -> {
+                    refreshDeviceBar();
+                    if (!done[0]) showCenterTip("局域网未找到设备；去「设置」手动搜索");
+                });
             }
         });
     }
@@ -1621,7 +1756,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         h.removeCallbacks(hideTip);
-        if (peerListener != null) PeerManager.get().removeListener(peerListener);
+        h.removeCallbacks(devRefresh);
         try { unregisterReceiver(commit); } catch (Exception ignored) { }
         try { unregisterReceiver(result); } catch (Exception ignored) { }
         super.onDestroy();

@@ -13,7 +13,11 @@ KeyVoice · Windows 接收端（消息列表版，深色设计系统）
   用 has_caret() 做真实光标校验，避免打到没有焦点的窗口（修复“收到却没录入”的 bug）。
 - 底部输入框：可手动编辑 / 粘贴，点「上屏」把内容发到当前光标处；「清空」清输入框；
   「清空列表」清掉所有历史消息。
-- 局域网自动发现：监听 UDP 17891，手机点「搜索电脑」时回包，自动连上。
+- 局域网自动发现（多设备互发现）：
+    · 监听 UDP 17891（老协议）→ 回 KEYVOICE_HELLO:<port>
+    · 监听 UDP 17893（新协议）→ 回 KV_PC_HERE:<port>:<设备名>
+    · 点「搜索设备」主动广播 17893，列出局域网内所有手机与电脑
+- 本机设备名可改（存 %APPDATA%\\KeyVoice\\config.json），会广播给其它终端。
 - adb 模式：adb reverse tcp:17890 tcp:17890 后手机发到 127.0.0.1 即可。
 
 配色与 Android 端（res/values/colors.xml / Ui.java）共用同一套深色 token。
@@ -38,6 +42,71 @@ PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 17890
 PHONE_SRV_PORT = 17892
 # 最近一次 UDP 发现的手机 IP（供「发到手机」直连用）
 PHONE_ADDR = {"ip": None}
+# 局域网发现端口（新协议：手机与电脑互发现）
+DISCOVER_PORT = 17893
+# 老协议发现端口（仅电脑应答）
+BEACON_PORT = 17891
+
+# --------------------------------------------------------- 配置文件（设备名）
+
+def _config_path():
+    """配置文件路径。优先 %APPDATA%\\KeyVoice\\config.json，写不了就退回脚本同目录。"""
+    candidates = []
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        candidates.append(os.path.join(appdata, "KeyVoice", "config.json"))
+    candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "keyvoice_config.json"))
+    for p in candidates:
+        d = os.path.dirname(p)
+        try:
+            os.makedirs(d, exist_ok=True)
+            # 试探性打开，确认真的可写
+            with open(p, "a", encoding="utf-8"):
+                pass
+            return p
+        except Exception:
+            continue
+    return None
+
+
+def load_device_name():
+    """读取本机设备名；没有就返回默认（计算机名）。"""
+    p = _config_path()
+    if p:
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            name = (cfg.get("device_name") or "").strip()
+            if name:
+                return name
+        except Exception:
+            pass
+    return socket.gethostname() or "电脑"
+
+
+def save_device_name(name):
+    """持久化本机设备名。存不下也不影响本次会话（内存里已经生效）。"""
+    p = _config_path()
+    if not p:
+        return False
+    data = {}
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        data = {}
+    data["device_name"] = (name or "").strip()
+    try:
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
+
+
+# 设备名是全局共享的：应答别的设备发现、发消息署名都用它
+DEVICE_NAME = {"name": load_device_name()}
 
 # ----------------------------------------------------------- 深色设计 token
 BG = "#0E1116"          # 窗口背景
@@ -276,10 +345,11 @@ def serve(port, app):
 # -------------------------------------------------------- 局域网自动发现（回应）
 
 def udp_listen(port):
+    """老协议应答（UDP 17891）：老版本手机只认 KEYVOICE_HELLO:<port>。"""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind(("0.0.0.0", 17891))
+        s.bind(("0.0.0.0", BEACON_PORT))
         s.settimeout(0.5)
         while True:
             try:
@@ -295,8 +365,63 @@ def udp_listen(port):
         pass
 
 
+def _ips_from_ipconfig():
+    """从 ipconfig 输出里补齐本地 IPv4（Windows 专用兜底）。
+
+    getaddrinfo(gethostname()) 在某些机器上只返回 127.0.0.1（主机名没进 DNS/hosts），
+    那样算出来的广播地址就会漏掉真实网段 —— 表现是「点了搜索，一台设备都搜不到」。
+    ipconfig 是 Windows 上最全的来源，用它兜底。
+    """
+    out = set()
+    try:
+        import re
+        import subprocess
+        out_bytes = subprocess.run(
+            ["ipconfig"], capture_output=True, timeout=5,
+            creationflags=0x08000000,          # CREATE_NO_WINDOW，不闪黑框
+        ).stdout
+        for enc in ("gbk", "utf-8"):
+            try:
+                txt = out_bytes.decode(enc)
+                break
+            except Exception:
+                continue
+        else:
+            return out
+        for m in re.finditer(r"IPv4[^:\uff1a]*[:\uff1a]\s*([0-9.]+)", txt):
+            out.add(m.group(1))
+    except Exception:
+        pass
+    return out
+
+
+def my_ips():
+    """本机【所有】IPv4 地址。三个来源取并集，尽量不漏网卡。
+
+    UDP 广播自己也能收到，所以「过滤自己」不能只比一个 IP：机器常有多张网卡
+    （WiFi / 有线 / 虚拟机 / VPN），按路由选出来的那个未必就是发广播用的那个。
+    只要漏判，设备清单里就会多出一台"自己"。这里收集全部本地地址，命中任一即视为自己。
+    """
+    ips = set()
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ips.add(info[4][0])
+    except Exception:
+        pass
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ips.add(s.getsockname()[0])
+        s.close()
+    except Exception:
+        pass
+    ips |= _ips_from_ipconfig()
+    ips.discard("127.0.0.1")
+    return ips
+
+
 def my_ip():
-    """本机局域网 IP（用于发现自己，避免把自己的应答当成别的设备）"""
+    """本机主 IPv4（用于展示）。取不到返回空串。"""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
@@ -307,40 +432,81 @@ def my_ip():
         return ""
 
 
-def discover_lan(timeout=0.8):
-    """广播 KV_DISCOVER，收集局域网内的 KeyVoice 设备（手机+电脑）。
-    返回 [(ip, kind, name)]，kind: 'phone' / 'pc'"""
+def broadcast_addrs():
+    """所有本地网段的定向广播地址，兜底再加 255.255.255.255。
+
+    必须枚举【全部】本地 IP：机器常有多张网卡（WiFi / 有线 / 虚拟机 / VPN），
+    只按默认路由算一个网段的话，目标设备若不在该网段就永远收不到广播，
+    表现为「点了搜索却一台也搜不到」。
+    """
+    out = set()
+    for ip in my_ips():
+        parts = ip.split(".")
+        if len(parts) == 4:
+            out.add(".".join(parts[:3]) + ".255")
+    out.add("255.255.255.255")
+    return out
+
+
+def _parse_hello(msg):
+    """解析一条发现应答，返回 (kind, port, name)；不认识返回 None。
+
+    新格式：KV_PC_HERE:<port>:<name> / KV_PHONE_HERE:<port>:<name>
+    兼容更老的 build：KV_PC_HERE:<name>（没有端口，走默认端口）
+    """
+    for kind, tag, default_port in (("pc", "KV_PC_HERE", PORT),
+                                    ("phone", "KV_PHONE_HERE", PHONE_SRV_PORT)):
+        if msg.startswith(tag):
+            rest = msg[len(tag):].lstrip(":").strip()
+            if ":" in rest:
+                p, _, name = rest.partition(":")
+                try:
+                    port = int(p.strip())
+                except ValueError:
+                    port = default_port
+                return kind, port, name.strip()
+            return kind, default_port, rest
+    return None
+
+
+def discover_lan(timeout=1.2):
+    """广播 KV_DISCOVER，收集局域网内的 KeyVoice 设备（手机 + 电脑）。
+
+    返回 [(ip, kind, name, port)]，kind: 'phone' / 'pc'
+    """
     found = {}
-    me = my_ip()
+    mine = my_ips()
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.settimeout(0.15)
-        # 子网定向广播（Windows 常禁止发 255.255.255.255）+ 全网广播双保险
-        me = my_ip()
-        subnet_bc = (me.rsplit(".", 1)[0] + ".255") if me else ""
+        # 每个本地网段都发定向广播（Windows 常禁止发 255.255.255.255）+ 全网广播兜底。
+        # 多网卡机器上只发一个网段会漏掉另一网段里的设备。
+        bcs = sorted(broadcast_addrs())
         for _ in range(4):
-            try:
-                s.sendto(b"KV_DISCOVER", ("255.255.255.255", 17893))
-            except Exception:
-                pass
-            if subnet_bc:
+            for ip in bcs:
                 try:
-                    s.sendto(b"KV_DISCOVER", (subnet_bc, 17893))
+                    s.sendto(b"KV_DISCOVER", (ip, DISCOVER_PORT))
                 except Exception:
                     pass
+            time.sleep(0.05)
         end = time.time() + timeout
         while time.time() < end:
             try:
                 data, addr = s.recvfrom(256)
                 msg = data.decode("utf-8", "ignore")
-                if addr[0] == me:
+                # 排除自己：本机也会收到自己发的广播并应答
+                if addr[0] in mine:
                     continue
-                if msg.startswith("KV_PHONE_HERE:"):
-                    found[addr[0]] = ("phone", msg.split(":", 1)[1])
-                elif msg.startswith("KV_PC_HERE:"):
-                    found.setdefault(addr[0], ("pc", msg.split(":", 1)[1]))
+                parsed = _parse_hello(msg)
+                if not parsed:
+                    continue
+                kind, port, name = parsed
+                # 同一台设备可能同时回新老两种报文，优先保留带名字的那条
+                prev = found.get(addr[0])
+                if prev is None or (not prev[1] and name):
+                    found[addr[0]] = (kind, name, port)
             except socket.timeout:
                 continue
             except Exception:
@@ -348,22 +514,25 @@ def discover_lan(timeout=0.8):
         s.close()
     except Exception:
         pass
-    return [(ip, k, n) for ip, (k, n) in found.items()]
+    return [(ip, k, n, p) for ip, (k, n, p) in found.items()]
 
 
 def lan_discover_responder():
-    """应答别的设备的发现广播（PC ↔ PC 互发现）"""
+    """应答别的设备的发现广播（手机 → 本电脑 / 电脑 ↔ 电脑）。
+
+    新协议应答里带上【端口 + 本机设备名】，这样手机和别的电脑扫到的是
+    「张三的电脑」这种名字，而不是一串 IP。设备名可在界面上改，立即生效。
+    """
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind(("", 17893))
+        s.bind(("", DISCOVER_PORT))
         s.settimeout(0.5)
-        name = socket.gethostname() or "PC"
         while True:
             try:
                 data, addr = s.recvfrom(256)
-                if data.startswith(b"KV_DISCOVER") and addr[0] != my_ip():
-                    out = ("KV_PC_HERE:" + name).encode("utf-8")
+                if data.startswith(b"KV_DISCOVER") and addr[0] not in my_ips():
+                    out = ("KV_PC_HERE:%d:%s" % (PORT, DEVICE_NAME["name"])).encode("utf-8")
                     s.sendto(out, addr)
             except socket.timeout:
                 continue
@@ -390,6 +559,8 @@ class Box:
         self.drag = None               # 拖拽中的消息
         self.drag_ghost = None         # 拖拽时跟随光标的小窗
         self._idle = None             # 空闲计时器
+        self.lan_devices = []         # 最近一次扫描到的局域网设备
+        self._scanning = False        # 是否正在扫描（防重入）
 
         self.var_status = tk.StringVar(value="监听中（端口 %d）· 等待连接" % port)
         self.var_auto = tk.BooleanVar(value=True)
@@ -432,6 +603,22 @@ class Box:
         hdr.bind("<Button-1>", self._hdr_click)
         self.title_label.bind("<Button-1>", self._hdr_click)
         self._tick_clock()
+
+        # 设备栏：本机名称 + 局域网设备数量与清单（点「搜索设备」重新扫描）
+        devbar = tk.Frame(root, bg=SURFACE)
+        devbar.pack(fill="x")
+        self.devbar = devbar
+        self.var_devname = tk.StringVar(value=DEVICE_NAME["name"])
+        self.dev_name_label = tk.Label(devbar, textvariable=self.var_devname, bg=SURFACE,
+                                       fg=TEXT, font=("Microsoft YaHei", 10, "bold"),
+                                       anchor="w")
+        self.dev_name_label.pack(side="left", padx=(12, 6), pady=(0, 6))
+        self.var_devlist = tk.StringVar(value="未发现设备")
+        self.dev_list_label = tk.Label(devbar, textvariable=self.var_devlist, bg=SURFACE,
+                                       fg=TEXT3, font=FONT_SM, anchor="w", justify="left")
+        self.dev_list_label.pack(side="left", fill="x", expand=True, pady=(0, 6))
+        self.btn_scan = self._hdr_btn(devbar, "搜索设备", self._scan_devices)
+        self.btn_rename = self._hdr_btn(devbar, "改名", self._rename_device)
 
         # 消息列表（可滚动）
         self.list_frame = tk.Frame(root, bg=BG)
@@ -496,6 +683,34 @@ class Box:
                                    font=("Microsoft YaHei", 10, "bold"),
                                    anchor="w", padx=10, pady=5)
         self._poll_hover()
+
+        # 进界面先扫一次局域网，顶栏就能立刻显示「发现 N 台设备」
+        self._auto_scan()
+
+    # --------------------------------------------------------- 定时扫描设备
+
+    # 自动刷新间隔（毫秒）。只是偶尔发几个 UDP 广播，开销可以忽略。
+    DEV_SCAN_MS = 15000
+
+    def _auto_scan(self):
+        """静默刷新设备数量：只更新设备栏文字，不弹提示。"""
+        def work():
+            devices = discover_lan()
+
+            def done():
+                self.lan_devices = devices
+                if not devices:
+                    self.var_devlist.set("未发现设备")
+                else:
+                    names = ", ".join("%s（%s）" % (d[2] or d[0],
+                                                   "手机" if d[1] == "phone" else "电脑")
+                                       for d in devices)
+                    self.var_devlist.set("发现 %d 台设备：%s" % (len(devices), names))
+
+            self.root.after(0, done)
+
+        threading.Thread(target=work, daemon=True).start()
+        self.root.after(self.DEV_SCAN_MS, self._auto_scan)
 
     # ----------------------------------------------------------- UI 小工具
     @staticmethod
@@ -768,14 +983,13 @@ class Box:
         threading.Thread(target=work, daemon=True).start()
 
     def _send_all(self, text):
-        from_name = socket.gethostname() or "PC"
+        from_name = DEVICE_NAME["name"]
         body = json.dumps({"text": text, "from": from_name}).encode("utf-8")
         targets, seen = [], set()
-        for ip, kind, name in discover_lan():
+        for ip, kind, name, port in discover_lan():
             if ip in seen:
                 continue
             seen.add(ip)
-            port = PHONE_SRV_PORT if kind == "phone" else PORT
             targets.append(("http://%s:%d/text" % (ip, port), name or ip, None))
         if PHONE_ADDR["ip"] and PHONE_ADDR["ip"] not in seen:
             seen.add(PHONE_ADDR["ip"])
@@ -829,6 +1043,93 @@ class Box:
         self.update_status()
         self.toast("已清空消息列表")
 
+    # ------------------------------------------------- 设备名 / 设备数量
+
+    def _apply_device_name(self, name):
+        """改本机名：内存 + 配置文件 + 界面同步。空名忽略（退回原值）。"""
+        name = (name or "").strip()
+        if not name:
+            return False
+        DEVICE_NAME["name"] = name
+        self.var_devname.set(name)
+        save_device_name(name)
+        return True
+
+    def _rename_device(self):
+        """弹一个小窗口改本机设备名（会广播给局域网内其它 KeyVoice 终端）。"""
+        win = tk.Toplevel(self.root)
+        win.title("设置本机名称")
+        win.configure(bg=BG)
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+        win.transient(self.root)
+        try:
+            win.grab_set()
+        except Exception:
+            pass
+
+        tk.Label(win, text="本机名称（其它设备搜索时会看到）", bg=BG, fg=TEXT2,
+                 font=FONT_SM).pack(anchor="w", padx=14, pady=(12, 6))
+        entry = tk.Entry(win, bg=SURFACE_HI, fg=TEXT, insertbackground=TEXT,
+                         relief="flat", font=FONT_SM, width=28)
+        entry.insert(0, DEVICE_NAME["name"])
+        entry.pack(fill="x", padx=14, pady=(0, 10))
+        entry.select_range(0, "end")
+
+        hint = tk.Label(win, text="", bg=BG, fg=TEXT3, font=FONT_SM)
+        hint.pack(anchor="w", padx=14, pady=(0, 6))
+
+        def commit():
+            if self._apply_device_name(entry.get()):
+                hint.configure(text="已保存，其它设备搜索时即可看到新名称", fg=SUCCESS)
+                self.toast("本机名称已更新为：" + DEVICE_NAME["name"])
+                self.root.after(700, win.destroy)
+            else:
+                hint.configure(text="名称不能为空", fg=ERROR)
+
+        bar = tk.Frame(win, bg=BG)
+        bar.pack(fill="x", padx=14, pady=(0, 12))
+        self._btn(bar, "保存", commit, "right")
+        self._btn(bar, "取消", win.destroy, "right")
+        entry.bind("<Return>", lambda e: commit())
+        entry.focus_set()
+
+        # 居中到主窗口
+        win.update_idletasks()
+        w, hgt = win.winfo_width(), win.winfo_height()
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - w) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height() - hgt) // 2
+        win.geometry("+%d+%d" % (max(0, x), max(0, y)))
+
+    def _scan_devices(self):
+        """扫描局域网，更新「发现 N 台设备」并把清单显示在设备栏。"""
+        if getattr(self, "_scanning", False):
+            return
+        self._scanning = True
+        self.btn_scan.configure(text="搜索中…", state="disabled")
+        self.var_devlist.set("正在搜索设备…")
+
+        def work():
+            devices = discover_lan()
+
+            def done():
+                self._scanning = False
+                self.btn_scan.configure(text="搜索设备", state="normal")
+                self.lan_devices = devices
+                if not devices:
+                    self.var_devlist.set("未发现设备（确认对方已运行 KeyVoice 且在同一 WiFi）")
+                    return
+                names = ", ".join("%s（%s %s）" % (d[2] or d[0],
+                                                  "手机" if d[1] == "phone" else "电脑",
+                                                  d[0])
+                               for d in devices)
+                self.var_devlist.set("发现 %d 台设备：%s" % (len(devices), names))
+                self.toast("找到 %d 台设备" % len(devices))
+
+            self.root.after(0, done)
+
+        threading.Thread(target=work, daemon=True).start()
+
     # ----------------------------------------------------------- 置顶 / 收起
     def _toggle_top(self):
         self.top = not self.top
@@ -879,6 +1180,8 @@ class Box:
         self.root.title("KeyVoice")
         self.flash_bar.configure(height=3)
         self.hdr.pack(fill="x")               # 子部件未拆散，重排整个标题行即可
+        self.hdr.pack(fill="x")               # 子部件从未拆散，重排整个标题行即可
+        self.devbar.pack(fill="x")
         self.list_frame.pack(fill="both", expand=True, padx=0, pady=0)
         self.input_frame.pack(fill="x")
         self.docked = False
@@ -1065,7 +1368,8 @@ def main():
     try:  # pythonw（无控制台后台运行）下 stdout 为 None，print 会抛错
         print("KeyVoice 接收端  消息列表窗口 右上角置顶  端口 %d" % PORT)
         print("adb 模式：  adb reverse tcp:%d tcp:%d" % (PORT, PORT))
-        print("局域网：手机点「搜索电脑」会自动连上本机")
+        print("局域网：手机点「搜索设备」会自动找到本机（电脑和手机都能互相发现）")
+        print("本机名称：%s（界面右上角「改名」可修改）" % DEVICE_NAME["name"])
     except Exception:
         pass
     threading.Thread(target=udp_listen, args=(PORT,), daemon=True).start()

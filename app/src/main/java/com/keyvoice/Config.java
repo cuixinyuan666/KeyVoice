@@ -165,6 +165,33 @@ public class Config {
     public String theme() { return sp.getString("theme", "dark"); }
     public void theme(String v) { sp.edit().putString("theme", v).apply(); }
 
+    // ---------------------------------------------------------------- 设备标识
+    /** 设备名默认值：出厂型号（如 "V1938CT"）；取不到时兜底 "Android" */
+    public static String defaultDeviceName() {
+        String m = android.os.Build.MODEL;
+        if (m == null) m = "";
+        m = m.trim();
+        return m.isEmpty() ? "Android" : m;
+    }
+
+    /**
+     * 用户自定义的设备名；空串表示「用默认名」。
+     * <p>
+     * 这个名字会出现在两个地方：① 局域网发现应答（别的设备看到的名字）；
+     * ② 主页面 / 设置页顶部的「本机名称」。
+     */
+    public String deviceName() { return sp.getString("device_name", ""); }
+    public void deviceName(String v) {
+        sp.edit().putString("device_name", v == null ? "" : v.trim()).apply();
+    }
+
+    /** 对外统一入口：没自定义就用默认名，保证永不为空 */
+    public String effDeviceName() {
+        String s = deviceName();
+        if (s == null || s.trim().isEmpty()) return defaultDeviceName();
+        return s.trim();
+    }
+
     // ---------------------------------------------------------------- 输入框布局
     // 输入框也可长按调节：位移（translationX/Y，像素）+ 缩放 + 上下颠倒。
     // 一并写入 SharedPreferences，App 关闭后依然保留。
@@ -213,9 +240,4 @@ public class Config {
     /** 跨页面「恢复默认布局」请求标记：设置页点按钮后置位，主页面 onResume 时消费 */
     public boolean layoutResetRequested() { return sp.getBoolean("layout_reset_req", false); }
     public void layoutResetRequested(boolean v) { sp.edit().putBoolean("layout_reset_req", v).apply(); }
-
-    // ---------------------------------------------------------------- 本机名称
-    /** 本机显示名（显示在对方聊天面板里），默认机型名 Build.MODEL */
-    public String deviceName() { return sp.getString("device_name", android.os.Build.MODEL); }
-    public void deviceName(String v) { sp.edit().putString("device_name", v == null ? "" : v).apply(); }
 }

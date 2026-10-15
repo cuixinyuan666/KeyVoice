@@ -19,11 +19,15 @@
     <!-- KeyVoice light theme tokens（「主题选择」新增） -->
     <color name="kvl_bg">#F2F4F8</color>
     <color name="kvl_surface">#FFFFFF</color>
-    <color name="kvl_surface_hi">#FFFFFF</color>
+    <!-- 浅色下 surface_hi 若与 surface 同为纯白，卡片里的输入框/按钮会失去层次，
+         这里给一层极浅的灰蓝，保证「卡片白 / 控件浅灰」的对比仍然成立。 -->
+    <color name="kvl_surface_hi">#EDF1F7</color>
     <color name="kvl_border">#D3DAE4</color>
     <color name="kvl_text">#1B2230</color>
     <color name="kvl_text2">#5A6577</color>
     <color name="kvl_text3">#8A94A6</color>
+    <!-- 浅色下的「按下态 / 高亮」用浅蓝，不能用深色的深蓝（会在白底上糊成一块） -->
+    <color name="kvl_primary_dim">#D6E4FF</color>
 
     <!-- 输入框文字颜色可选项（设置页色板） -->
     <color name="sw_white">#FFFFFF</color>

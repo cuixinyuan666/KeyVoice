@@ -1,5 +1,6 @@
 package com.keyvoice;
 
+import android.content.Context;
 import android.util.Log;
 
 import java.io.ByteArrayOutputStream;
@@ -37,13 +38,19 @@ public final class LanServer {
 
     private static volatile Listener listener;
     private static volatile boolean started = false;
+    /** 本机对外广播的设备名（用户可在设置里改） */
+    private static volatile String deviceName = Config.defaultDeviceName();
+    /** 发现应答线程是否已起来，避免 Activity 重建时重复绑定 17893 */
+    private static volatile boolean discoveryStarted = false;
 
     private LanServer() { }
 
     /** 启动服务器（幂等：重复调用只更新监听器，不会重复绑定端口）。
      *  Activity 重建时再次调用即可把新页面的输入框接进来。 */
-    public static void start(Listener l) {
+    public static void start(Context ctx, Listener l) {
         listener = l;
+        // 每次启动都重读一次：用户在设置里改过名字后回到主页面即可生效
+        if (ctx != null) deviceName = new Config(ctx.getApplicationContext()).effDeviceName();
         if (started) return;
         started = true;
         Thread t = new Thread(LanServer::run, "KeyVoiceLanServer");
@@ -52,8 +59,25 @@ public final class LanServer {
         startDiscovery();
     }
 
-    /** 应答电脑端的 UDP 广播发现：让同一局域网的电脑能列出本机（多设备互发现） */
+    /** 设置里改了设备名后调用：立即生效，无需重启 App */
+    public static void setDeviceName(String name) {
+        if (name == null) return;
+        name = name.trim();
+        if (!name.isEmpty()) deviceName = name;
+    }
+
+    /** 当前对外广播的设备名 */
+    public static String getDeviceName() { return deviceName; }
+
+    /**
+     * 应答局域网里的发现广播（KV_DISCOVER，端口 17893）。
+     * <p>
+     * 应答里带上【端口 + 用户设置的设备名】，这样电脑端和其它手机能直接列出
+     * 「DESKTOP-ABC」「Pixel 7」这样的名字，而不是一串 IP。
+     */
     private static void startDiscovery() {
+        if (discoveryStarted) return;
+        discoveryStarted = true;
         Thread t = new Thread(() -> {
             try {
                 java.net.DatagramSocket ds = new java.net.DatagramSocket(DISCOVER_PORT);
@@ -63,14 +87,8 @@ public final class LanServer {
                 while (true) {
                     ds.receive(p);
                     String s = new String(p.getData(), 0, p.getLength(), StandardCharsets.UTF_8);
-                    // 应答两类发现请求：
-                    //   KV_DISCOVER    —— 旧版 PC 端扫描（兼容）
-                    //   KV_PEER_DISCOVER —— 手机间互发现（带端口，便于对端直接 POST 消息）
-                    if (s.startsWith("KV_DISCOVER") || s.startsWith(PeerManager.REQUEST)) {
-                        String name = android.os.Build.MODEL;
-                        if (name == null || name.isEmpty()) name = "Android";
-                        // 回包带上本机监听端口，对端据此把消息 POST 到 <ip>:<PORT>/text
-                        byte[] out = (PeerManager.REPLY + ":" + name + ":" + PORT)
+                    if (s.startsWith("KV_DISCOVER")) {
+                        byte[] out = ("KV_PHONE_HERE:" + PORT + ":" + deviceName)
                                 .getBytes(StandardCharsets.UTF_8);
                         ds.send(new java.net.DatagramPacket(out, out.length,
                                 p.getAddress(), p.getPort()));
