@@ -412,8 +412,18 @@ public class MainActivity extends Activity {
             }
         });
 
-        registerReceiver(commit, new IntentFilter("com.keyvoice.COMMIT"));
-        registerReceiver(result, new IntentFilter(VoiceService.ACTION_RESULT));
+        // Android 13+ 强制要求：运行时注册非系统广播接收器必须显式声明导出性，
+        // 否则直接 SecurityException 崩溃（Android 15 实测）。两个 action 都是自有广播，
+        // 且发送端 setPackage(getPackageName()) 为显式 intent，NOT_EXPORTED 可正常收到。
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(commit, new IntentFilter("com.keyvoice.COMMIT"),
+                    android.content.Context.RECEIVER_NOT_EXPORTED);
+            registerReceiver(result, new IntentFilter(VoiceService.ACTION_RESULT),
+                    android.content.Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(commit, new IntentFilter("com.keyvoice.COMMIT"));
+            registerReceiver(result, new IntentFilter(VoiceService.ACTION_RESULT));
+        }
 
         // PC → 手机：启动局域网接收服务（端口 17892）。
         // 处理逻辑仿照 PC 端「收到消息」：插入输入框光标处（等同上屏）+ 存剪贴板 + 提示。

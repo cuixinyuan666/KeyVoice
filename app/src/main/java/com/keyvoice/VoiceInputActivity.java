@@ -110,8 +110,16 @@ public class VoiceInputActivity extends Activity {
             }
         });
 
-        registerReceiver(commit, new IntentFilter("com.keyvoice.COMMIT"));
-        registerReceiver(result, new IntentFilter(VoiceService.ACTION_RESULT));
+        // Android 13+ 必须显式声明导出性，否则 SecurityException 崩溃（同 MainActivity）
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(commit, new IntentFilter("com.keyvoice.COMMIT"),
+                    android.content.Context.RECEIVER_NOT_EXPORTED);
+            registerReceiver(result, new IntentFilter(VoiceService.ACTION_RESULT),
+                    android.content.Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(commit, new IntentFilter("com.keyvoice.COMMIT"));
+            registerReceiver(result, new IntentFilter(VoiceService.ACTION_RESULT));
+        }
 
         if ("sr".equals(cfg.mode())) {
             // 交给识别服务，自己只做展示（结果通过广播回来）
