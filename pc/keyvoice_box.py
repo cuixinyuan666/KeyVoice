@@ -708,9 +708,150 @@ def lan_discover_responder():
         pass
 
 
+# ------------------------------------------------------------ 投屏省电看门狗
+
+class MirrorGuard:
+    """投屏省电看门狗：黑屏省电 + 鼠标一动自动亮屏可操控。
+
+    <b>实测结论（Android 15 / Flyme，2026-10-16 真机对照实验）</b>：
+    · {@code cmd display power-off} 只关显示：画面冻结、输入被丢弃（亮屏同坐标
+      点击能打开 App、黑屏同坐标点击无反应）——Android 安全设计，且系统随后
+      可能转入 Dozing（画面全黑）。不可用。
+    · POWER 键熄屏（Dozing）：输入同样被丢弃、scrcpy 画面全黑。不可用。
+    · <b>亮度设 0（本方案）</b>：物理屏幕不发光（OLED 省电≈熄屏），但系统认为
+      屏幕仍是 ON + Awake → 【输入注入有效】、【scrcpy 画面实时更新】、
+      adb 连接稳定。三项核心需求全部满足。
+
+    <b>策略</b>：投屏启动后把亮度设为 0（黑屏省电），看门狗每 250ms 检测鼠标
+    是否进入投屏窗口矩形：一旦进入就恢复原亮度点亮手机，用户即可正常操控。
+    鼠标离开窗口超过 idle_off 秒后自动再把亮度设 0，持续省电。
+    首次使用时记住原亮度/亮度模式，退出时完整还原。
+    """
+
+    def __init__(self, adb, serial, window_title="KeyVoice 手机投屏",
+                 idle_off=60.0, poll=0.25):
+        self.adb = adb
+        self.serial = serial
+        self.title = window_title
+        self.idle_off = idle_off          # 鼠标离开窗口多久自动黑屏（秒；<=0 禁用）
+        self.poll = poll
+        self._stop = threading.Event()
+        self._thread = None
+        self._proc = None
+        self._screen_on = True            # 本地记录的亮/黑状态（避免重复 adb 调用）
+        self._last_active = 0.0
+        self._orig_brightness = None      # 用户原亮度（首次黑屏前读取）
+        self._orig_mode = None            # 用户原亮度模式（0 手动 / 1 自动）
+        self._u32 = ctypes.windll.user32
+
+    def attach(self, proc):
+        self._proc = proc
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run,
+                                        name="KeyVoiceMirrorGuard", daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+
+    # ---- 内部 ----
+    def _settings_get(self, key):
+        try:
+            out = subprocess.run([self.adb, "-s", self.serial, "shell",
+                                  "settings", "get", "system", key],
+                                 capture_output=True, timeout=8,
+                                 creationflags=0x08000000).stdout.decode().strip()
+            return out
+        except Exception:
+            return ""
+
+    def _settings_put(self, key, value):
+        try:
+            subprocess.run([self.adb, "-s", self.serial, "shell",
+                            "settings", "put", "system", key, str(value)],
+                           capture_output=True, timeout=8,
+                           creationflags=0x08000000)
+            return True
+        except Exception:
+            return False
+
+    def _read_orig(self):
+        if self._orig_brightness is None:
+            v = self._settings_get("screen_brightness")
+            try:
+                self._orig_brightness = max(1, int(v))
+            except Exception:
+                self._orig_brightness = 128
+        if self._orig_mode is None:
+            v = self._settings_get("screen_brightness_mode")
+            self._orig_mode = v if v in ("0", "1") else "0"
+
+    def _power(self, on):
+        """on=True 恢复原亮度（亮屏可操控）；on=False 亮度设 0（黑屏省电）。"""
+        if not self.adb:
+            return
+        if on:
+            self._read_orig()
+            self._settings_put("screen_brightness_mode", self._orig_mode)
+            self._settings_put("screen_brightness", self._orig_brightness)
+            self._screen_on = True
+        else:
+            self._read_orig()
+            self._settings_put("screen_brightness_mode", 0)   # 先切手动，否则自动亮度会覆盖
+            self._settings_put("screen_brightness", 0)
+            self._screen_on = False
+
+    def _cursor_in(self, hwnd):
+        class POINT(ctypes.Structure):
+            _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+        class RECT(ctypes.Structure):
+            _fields_ = [("l", ctypes.c_long), ("t", ctypes.c_long),
+                        ("r", ctypes.c_long), ("b", ctypes.c_long)]
+        p = POINT()
+        if not self._u32.GetCursorPos(ctypes.byref(p)):
+            return False
+        r = RECT()
+        self._u32.GetWindowRect(hwnd, ctypes.byref(r))
+        return r.l <= p.x <= r.r and r.t <= p.y <= r.b
+
+    def _run(self):
+        while not self._stop.is_set():
+            try:
+                if self._proc is not None and self._proc.poll() is not None:
+                    break                       # scrcpy 已退出
+                hwnd = self._u32.FindWindowW(None, self.title)
+                inside = self._cursor_in(hwnd) if hwnd else False
+                now = time.time()
+                if inside:
+                    self._last_active = now
+                    if not self._screen_on:
+                        self._power(True)       # 鼠标进来 → 亮屏，开始操控
+                elif (self._screen_on and self.idle_off > 0
+                      and self._last_active > 0
+                      and now - self._last_active > self.idle_off):
+                    self._power(False)          # 鼠标离开超时 → 自动黑屏省电
+            except Exception:
+                pass
+            self._stop.wait(self.poll)
+        # 收尾：恢复亮度，避免手机被留在黑屏状态
+        try:
+            self._power(True)
+        except Exception:
+            pass
+
+
 # -------------------------------------------------------------------- 界面
 
 class Box:
+    def _safe_after(self, fn, *args):
+        """后台线程安全切主线程；mainloop 未运行（无头测试/异常场景）时不抛异常。"""
+        try:
+            self._safe_after(lambda: fn(*args))
+        except Exception:
+            pass
+
+
     def __init__(self, root, port):
         self.root = root
         self.port = port
@@ -730,6 +871,8 @@ class Box:
         self.remote = None            # kv_remote.RemoteServer 实例（远控开启时非 None）
         self.remote_win = None        # 远控信息小窗（Toplevel）
         self.sending_file = False     # 是否正在向手机发文件（防重入）
+        self.mirror_proc = None       # scrcpy 进程（手机投屏）
+        self.mirror_guard = None      # 投屏省电看门狗
 
         self.var_status = tk.StringVar(value="监听中（端口 %d）· 等待连接" % port)
         self.var_auto = tk.BooleanVar(value=True)
@@ -882,7 +1025,7 @@ class Box:
                                        for d in devices)
                     self.var_devlist.set("发现 %d 台设备：%s" % (len(devices), names))
 
-            self.root.after(0, done)
+            self._safe_after(done)
 
         threading.Thread(target=work, daemon=True).start()
         self.root.after(self.DEV_SCAN_MS, self._auto_scan)
@@ -945,7 +1088,7 @@ class Box:
 
     # ----------------------------------------------------------- 收消息
     def receive(self, text, from_name=""):
-        self.root.after(0, self._on_receive, text, from_name)
+        self._safe_after(self._on_receive, text, from_name)
 
     def _on_receive(self, text, from_name=""):
         self.total += 1
@@ -1153,7 +1296,7 @@ class Box:
                 if ok:
                     self.input_box.delete("1.0", "end")   # 发送成功清空输入框
 
-            self.root.after(0, done)
+            self._safe_after(done)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -1222,7 +1365,7 @@ class Box:
 
     def receive_file(self, path, size, from_name=""):
         """HTTP 线程收完文件后回调到这里：消息列表加一条文件行。"""
-        self.root.after(0, self._on_receive_file, path, size, from_name)
+        self._safe_after(self._on_receive_file, path, size, from_name)
 
     def _on_receive_file(self, path, size, from_name=""):
         self.total += 1
@@ -1315,7 +1458,7 @@ class Box:
         try:
             targets = self._file_targets()
             if not targets:
-                self.root.after(0, self.toast,
+                self._safe_after(self.toast,
                                 "没有发现手机：请让手机与电脑同 WiFi，或插 USB 后走 adb")
                 return
             for path in files:
@@ -1332,17 +1475,17 @@ class Box:
                         if pct == _lp[0] or pct % 5:
                             return
                         _lp[0] = pct
-                        self.root.after(0, self.var_status.set,
+                        self._safe_after(self.var_status.set,
                                         "发送 %s → %s：%d%%" % (_b, _n, pct))
 
                     ok, msg = self._upload_file(url, path, prog)
                     results.append("%s %s" % (tname, "完成" if ok else "失败"))
-                self.root.after(0, self.toast,
+                self._safe_after(self.toast,
                                 "已发「%s」（%s）：%s" % (base, human_size(size),
                                                         "；".join(results)))
         finally:
             self.sending_file = False
-            self.root.after(0, self.update_status)
+            self._safe_after(self.update_status)
 
     def _file_targets(self):
         """可接收文件的手机目标列表 [(url, 显示名)]：局域网发现优先，adb forward 兜底。"""
@@ -1457,7 +1600,7 @@ class Box:
         try:
             self.remote = kv_remote.RemoteServer(
                 port=REMOTE_PORT,
-                on_log=lambda s: self.root.after(0, self.toast, s))
+                on_log=lambda s: self._safe_after(self.toast, s))
             self.remote.start()
         except Exception as e:
             self.remote = None
@@ -1549,7 +1692,7 @@ class Box:
                 else:
                     messagebox.showerror(
                         "安装失败", "自动安装失败，请手动执行：\n\npip install pillow\n\n" + tail)
-            self.root.after(0, done)
+            self._safe_after(done)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -1603,16 +1746,21 @@ class Box:
     def launch_scrcpy(self):
         """手机投屏 / 电脑控手机：一键启动 scrcpy（151k★，ADB 通道，手机不用装 App）。
 
-        <b>锁屏也能操作（重点）</b>：
-        · 【黑屏自动点亮】启动前先发一次 KEYCODE_WAKEUP。scrcpy 文档说默认会
-          power-on，但实测 Flyme（Android 15）Dozing 状态下不生效、窗口会是一片黑；
-          先唤醒即可保证看到的是【锁屏界面】（不是黑屏），随后就能在电脑上
-          滑动/输密码解锁。
-        · 使用中手机又熄屏了：【右键点一下投屏窗口】= 熄屏时先唤醒 / 亮着时相当于返回键；
-        · 组合键：Alt+P = 电源（开关屏幕）、Alt+O = 关屏但继续投屏、Alt+Shift+O = 开屏；
-        · 加了 -w（--stay-awake）：手机【插着充电】时，投屏期间不会自动锁屏/息屏。
-          没插电时系统仍可能按息屏时间锁屏，届时右键唤醒继续操作即可。
+        <b>投屏省电模式（重点，实测方案）</b>：
+        · 投屏启动后手机屏幕【自动黑屏】省电（OLED 不发光；实现是把亮度设为 0，
+          不是关显示电源——实测关显示后输入会被 Android 丢弃、画面冻结，而亮度 0
+          时系统仍认为亮屏：【输入有效】【画面实时】【连接稳定】三项全占）。
+        · 【鼠标一动就亮屏】：把鼠标移入投屏窗口，看门狗自动恢复原亮度点亮手机，
+          随后即可正常点击/滑动/输密码。
+        · 鼠标移开投屏窗口 60 秒后自动再把亮度设 0，持续省电。
+        · 再次点「手机投屏」按钮 = 停止投屏并恢复手机原亮度。
+        · 其它：右键 = 熄屏时唤醒/亮屏时返回；Alt+P 电源；插充电线时 -w 生效
+          （投屏期间不自动息屏）。
         """
+        # 再次点击 = 停止（toggle）
+        if self.mirror_proc is not None and self.mirror_proc.poll() is None:
+            self._stop_mirror()
+            return
         scr, adb = self._scrcpy_paths()
         if not scr:
             if messagebox.askyesno(
@@ -1627,7 +1775,7 @@ class Box:
                 __import__("webbrowser").open(
                     "https://github.com/Genymobile/scrcpy/releases/latest")
             return
-        args = [scr]
+        serial = None
         if adb:
             devs = self._adb_devices(adb)
             if not devs:
@@ -1641,30 +1789,91 @@ class Box:
                     __import__("webbrowser").open(
                         "https://github.com/Genymobile/scrcpy/blob/master/doc/connection.md")
                 return
-            args += ["-s", devs[0]]
-            # 锁屏黑屏时先点亮屏幕再投屏。
-            # scrcpy 文档说默认启动会 power-on，但实测在 Flyme（Android 15）上
-            # Dozing 状态下不生效——手机仍是黑屏，投屏窗口里一片黑。
-            # 这里启动前主动发一次 KEYCODE_WAKEUP(224)：亮屏时是 no-op，
-            # 黑屏时点亮并显示锁屏界面（锁屏 ≠ 黑屏），用户即可在电脑上解锁。
+            serial = devs[0]
+            # 先唤醒一次：保证投屏建立时看到的是已点亮界面（锁屏 ≠ 黑屏，可解锁）
             try:
-                subprocess.run([adb, "-s", devs[0], "shell", "input", "keyevent", "224"],
+                subprocess.run([adb, "-s", serial, "shell", "input", "keyevent", "224"],
                                capture_output=True, timeout=8,
                                creationflags=0x08000000)
             except Exception:
                 pass
+        args = [scr]
+        if serial:
+            args += ["-s", serial]
         args += ["-w",                       # 插电时投屏期间不息屏（使用中不易被锁屏打断）
-                 "--window-title", "KeyVoice 手机投屏"]
+                 "--window-title", "KeyVoice 手机投屏",
+                 # 固定初始窗口尺寸：防止上次异常退出后 scrcpy 记住了畸形几何
+                 # （实测 terminate 会跳过窗口几何保存，下次可能开出 185x208 的小窗）
+                 "--window-width", "480", "--window-height", "1040"]
         env = dict(os.environ)
         if adb:
             # 关键：让 scrcpy 用【手机当前连接所在的那个 adb】，
             # 否则自带 adb 版本不同会把 adb server 重启、无线调试连接掉线
             env["ADB"] = adb
         try:
-            subprocess.Popen(args, env=env, creationflags=0x00000008)   # DETACHED：独立窗口
-            self.toast("已启动 scrcpy：锁屏时右键点投屏窗口=唤醒，仍可继续操作")
+            self.mirror_proc = subprocess.Popen(args, env=env,
+                                                creationflags=0x00000008)
         except Exception as e:
+            self.mirror_proc = None
             messagebox.showerror("启动 scrcpy 失败", str(e))
+            return
+        if adb and serial:
+            threading.Thread(target=self._mirror_powersave,
+                             args=(adb, serial), daemon=True).start()
+
+    def _mirror_powersave(self, adb, serial):
+        """等投屏窗口出现 → 自动黑屏省电 → 起看门狗（鼠标进入即亮屏）。"""
+        u32 = ctypes.windll.user32
+        hwnd = None
+        for _ in range(48):                      # 最多等 12 秒
+            if self.mirror_proc is None or self.mirror_proc.poll() is not None:
+                return
+            hwnd = u32.FindWindowW(None, "KeyVoice 手机投屏")
+            if hwnd:
+                break
+            time.sleep(0.25)
+        if not hwnd:
+            self._safe_after(self.toast, "投屏已启动（未找到窗口，跳过自动省电）")
+            return
+        # 自动黑屏省电：亮度设 0（物理不发光；系统仍认为亮屏 → 可操控、画面实时）
+        guard = MirrorGuard(adb, serial)
+        guard.attach(self.mirror_proc)
+        guard._power(False)
+        self.mirror_guard = guard
+        guard.start()
+        try:
+            self._safe_after(self.toast,
+                            "投屏省电模式已开启：手机屏幕已自动关闭；"
+                            "鼠标移入投屏窗口即亮屏可操控；移开 60 秒自动再黑屏")
+        except Exception:
+            pass
+
+    def _stop_mirror(self):
+        """停止投屏：停看门狗 → 结束 scrcpy → 恢复手机亮度。"""
+        guard = self.mirror_guard
+        adb = serial = None
+        if guard is not None:
+            adb, serial = guard.adb, guard.serial
+            guard.stop()
+            self.mirror_guard = None
+        if self.mirror_proc is not None:
+            try:
+                if self.mirror_proc.poll() is None:
+                    self.mirror_proc.terminate()
+            except Exception:
+                pass
+            self.mirror_proc = None
+        # 恢复亮度（guard 收尾会自动做一次；这里兜底再确保）
+        if adb is None:
+            scr, adb = self._scrcpy_paths()
+        if adb and serial is None:
+            devs = self._adb_devices(adb)
+            if devs:
+                serial = devs[0]
+        if adb and serial:
+            g = MirrorGuard(adb, serial)
+            g._power(True)
+        self.toast("已停止投屏，手机屏幕已恢复")
 
     # ------------------------------------------------- 设备名 / 设备数量
 
@@ -1749,7 +1958,7 @@ class Box:
                 self.var_devlist.set("发现 %d 台设备：%s" % (len(devices), names))
                 self.toast("找到 %d 台设备" % len(devices))
 
-            self.root.after(0, done)
+            self._safe_after(done)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -1981,6 +2190,16 @@ class Box:
             self.status_canvas.itemconfig(self.dot, fill=SUCCESS)
 
     def close(self):
+        try:
+            if self.mirror_guard is not None:
+                self.mirror_guard.stop()
+        except Exception:
+            pass
+        try:
+            if self.mirror_proc is not None and self.mirror_proc.poll() is None:
+                self.mirror_proc.terminate()
+        except Exception:
+            pass
         try:
             if self.remote is not None:
                 self.remote.stop()
