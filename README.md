@@ -253,9 +253,22 @@ PIN：  8312   （手机首次输入一次后记住）
 **电脑端**：点顶部 **「手机投屏」**：
 
 - 直接复用原版 [**scrcpy**](https://github.com/Genymobile/scrcpy)（151k★，ADB 通道，延迟 35~70ms，电脑鼠标键盘直接操控手机，不用在手机装任何东西）
-- 没装 scrcpy 时按钮会引导下载：去 [Releases](https://github.com/Genymobile/scrcpy/releases/latest) 下 win64 压缩包，**解压到 `pc\tools\scrcpy\`** 即可（里面自带 adb.exe），或把目录加进 PATH
+- 首次使用：点按钮后按提示**双击 `pc\下载scrcpy.bat`** 自动下载安装到 `pc\tools\scrcpy\`（也可去 [Releases](https://github.com/Genymobile/scrcpy/releases/latest) 手动下 win64 包解压进去，或把目录加进 PATH）
 - USB：连上手机、开启「USB 调试」→ 点按钮直接投屏
 - 无线：先用 USB 执行一次 `adb tcpip 5555`，拔线后 `adb connect <手机IP>:5555`，之后电脑上随时投屏
+
+**锁屏也能操作（重点）**：
+
+| 场景 | 效果 |
+|---|---|
+| 手机黑屏时点「手机投屏」 | 投屏前自动先唤醒手机 → 窗口里看到的是**锁屏/桌面界面（不是一片黑）** |
+| 投屏中手机又熄屏 | 在投屏窗口**右键点一下** = 熄屏时先唤醒 / 亮着时相当于返回键 |
+| 在投屏窗口里解锁 | 鼠标拖动=滑动、键盘直接输锁屏密码，和操作真机完全一致 |
+| 常用组合键 | `Alt+P` 电源（开关屏）· `Alt+O` 关屏但继续投屏 · `Alt+Shift+O` 开屏 |
+
+- 投屏期间自动加了 `--stay-awake`：手机**插着充电线**时不会自动锁屏/息屏（长时间操作不断线）；没插电时系统仍可能按息屏时间锁屏，届时右键唤醒即可
+- 实现说明：唤醒用 `adb shell input keyevent 224`（KEYCODE_WAKEUP，亮屏时是无操作）。scrcpy 文档说启动默认会 power-on，但实测 Flyme（Android 15）Dozing 状态下不生效、窗口会全黑，所以显式先唤醒
+- scrcpy 通过 `ADB` 环境变量指定用「手机当前连接的那个 adb」（PATH/Android SDK 优先）：若改用 scrcpy 自带 adb（版本通常不同）会重启 adb server，导致正在生效的无线调试连接掉线
 
 > 手机端「远程控制」页顶部也会提示这套流程；被投屏时手机上无任何弹窗。
 

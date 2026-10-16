@@ -1556,7 +1556,14 @@ class Box:
     # ==================================================== 电脑控手机（scrcpy 集成）
 
     def _scrcpy_paths(self):
-        """找 scrcpy / adb：优先 pc\\tools\\scrcpy\\（便携解压目录），再查 PATH。"""
+        """找 scrcpy / adb。优先 pc\\tools\\scrcpy\\（便携解压目录），再查 PATH。
+
+        adb 的选择顺序有个关键坑：必须优先用【PATH / Android SDK 里的那个】，
+        因为手机现在多半就是用它连上的（adb server 由该版本启动）。
+        scrcpy 自带的 adb 版本通常不同，直接用它会把 adb server 重启掉，
+        正在生效的无线调试（adb connect）连接会断。
+        拿到准确路径后通过 ADB 环境变量传给 scrcpy（scrcpy 认这个变量）。
+        """
         import shutil
         here = os.path.dirname(os.path.abspath(__file__))
         sdir = os.path.join(here, "tools", "scrcpy")
@@ -1565,11 +1572,19 @@ class Box:
             if cand and os.path.exists(cand):
                 scr = cand
                 break
-        adb = None
-        for cand in (os.path.join(sdir, "adb.exe"), shutil.which("adb")):
-            if cand and os.path.exists(cand):
+        adb = shutil.which("adb")
+        if not adb:
+            for env in ("ANDROID_HOME", "ANDROID_SDK_ROOT"):
+                root = os.environ.get(env)
+                if root:
+                    cand = os.path.join(root, "platform-tools", "adb.exe")
+                    if os.path.exists(cand):
+                        adb = cand
+                        break
+        if not adb:
+            cand = os.path.join(sdir, "adb.exe")
+            if os.path.exists(cand):
                 adb = cand
-                break
         return scr, adb
 
     def _adb_devices(self, adb_exe):
@@ -1586,16 +1601,28 @@ class Box:
             return []
 
     def launch_scrcpy(self):
-        """手机投屏 / 电脑控手机：一键启动 scrcpy（151k★，ADB 通道，手机不用装 App）。"""
+        """手机投屏 / 电脑控手机：一键启动 scrcpy（151k★，ADB 通道，手机不用装 App）。
+
+        <b>锁屏也能操作（重点）</b>：
+        · 【黑屏自动点亮】启动前先发一次 KEYCODE_WAKEUP。scrcpy 文档说默认会
+          power-on，但实测 Flyme（Android 15）Dozing 状态下不生效、窗口会是一片黑；
+          先唤醒即可保证看到的是【锁屏界面】（不是黑屏），随后就能在电脑上
+          滑动/输密码解锁。
+        · 使用中手机又熄屏了：【右键点一下投屏窗口】= 熄屏时先唤醒 / 亮着时相当于返回键；
+        · 组合键：Alt+P = 电源（开关屏幕）、Alt+O = 关屏但继续投屏、Alt+Shift+O = 开屏；
+        · 加了 -w（--stay-awake）：手机【插着充电】时，投屏期间不会自动锁屏/息屏。
+          没插电时系统仍可能按息屏时间锁屏，届时右键唤醒继续操作即可。
+        """
         scr, adb = self._scrcpy_paths()
         if not scr:
             if messagebox.askyesno(
                     "未找到 scrcpy",
                     "「手机投屏 / 电脑控手机」直接复用开源项目 scrcpy（GitHub 151k★）。\n\n"
-                    "获取方式：\n"
-                    "1. 打开 https://github.com/Genymobile/scrcpy/releases/latest\n"
-                    "2. 下载 win64 压缩包，解压到  pc\\tools\\scrcpy\\  （或把目录加入 PATH）\n"
-                    "3. 里面自带 adb.exe，插件无需另外安装\n\n"
+                    "获取方式（任选其一）：\n"
+                    "1. 双击 pc\\下载scrcpy.bat 自动下载到 pc\\tools\\scrcpy\\\n"
+                    "2. 打开 https://github.com/Genymobile/scrcpy/releases/latest 下 win64\n"
+                    "   压缩包，解压到  pc\\tools\\scrcpy\\  （或把目录加入 PATH）\n"
+                    "3. 里面自带 adb.exe，无需另外安装\n\n"
                     "是否现在打开下载页？"):
                 __import__("webbrowser").open(
                     "https://github.com/Genymobile/scrcpy/releases/latest")
@@ -1615,10 +1642,27 @@ class Box:
                         "https://github.com/Genymobile/scrcpy/blob/master/doc/connection.md")
                 return
             args += ["-s", devs[0]]
-        args += ["--stay-awake", "--window-title", "KeyVoice 手机投屏"]
+            # 锁屏黑屏时先点亮屏幕再投屏。
+            # scrcpy 文档说默认启动会 power-on，但实测在 Flyme（Android 15）上
+            # Dozing 状态下不生效——手机仍是黑屏，投屏窗口里一片黑。
+            # 这里启动前主动发一次 KEYCODE_WAKEUP(224)：亮屏时是 no-op，
+            # 黑屏时点亮并显示锁屏界面（锁屏 ≠ 黑屏），用户即可在电脑上解锁。
+            try:
+                subprocess.run([adb, "-s", devs[0], "shell", "input", "keyevent", "224"],
+                               capture_output=True, timeout=8,
+                               creationflags=0x08000000)
+            except Exception:
+                pass
+        args += ["-w",                       # 插电时投屏期间不息屏（使用中不易被锁屏打断）
+                 "--window-title", "KeyVoice 手机投屏"]
+        env = dict(os.environ)
+        if adb:
+            # 关键：让 scrcpy 用【手机当前连接所在的那个 adb】，
+            # 否则自带 adb 版本不同会把 adb server 重启、无线调试连接掉线
+            env["ADB"] = adb
         try:
-            subprocess.Popen(args, creationflags=0x00000008)   # DETACHED：独立窗口
-            self.toast("已启动 scrcpy（手机投屏）")
+            subprocess.Popen(args, env=env, creationflags=0x00000008)   # DETACHED：独立窗口
+            self.toast("已启动 scrcpy：锁屏时右键点投屏窗口=唤醒，仍可继续操作")
         except Exception as e:
             messagebox.showerror("启动 scrcpy 失败", str(e))
 
