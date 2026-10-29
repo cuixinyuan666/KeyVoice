@@ -769,6 +769,7 @@ public class MainActivity extends Activity {
 
             @Override public void onDone(java.util.List<Discover.Device> all) {
                 if (mySeq != scanSeq) return;
+                Sender.rememberPcs(all);
                 runOnUiThread(() -> {
                     if (mySeq != scanSeq) return;
                     lanDevices.clear();
@@ -1824,6 +1825,7 @@ public class MainActivity extends Activity {
 
             @Override
             public void onDone(java.util.List<Discover.Device> all) {
+                Sender.rememberPcs(all);
                 lanDevices.clear();
                 lanDevices.addAll(all);
                 runOnUiThread(() -> {
