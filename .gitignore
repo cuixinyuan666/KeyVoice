@@ -25,3 +25,13 @@ keystore.properties
 
 # scrcpy 便携目录（约 11MB，不进仓库；用 pc/下载scrcpy.bat 一键获取）
 pc/tools/
+
+# ---------------------------------------------------------------- dist/ 本地产物
+# dist 只放【发布说明】进仓库；截图 / 日志 / dump / 调试脚本 / 反编译检查目录
+# 都是现场排查的临时产物，不进仓库（体积大、无复用价值）。
+dist/*
+!dist/RELEASE_NOTES_*.md
+
+# 老版本备份与反编译对比目录
+dist/backup_local_*/
+dist/dexcheck*/
