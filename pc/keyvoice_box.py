@@ -1005,27 +1005,17 @@ class Box:
         self.flash_bar = tk.Frame(root, bg=BORDER, height=3)
         self.flash_bar.pack(fill="x")
 
-        # 顶栏
-        hdr = tk.Frame(root, bg=SURFACE)
-        hdr.pack(fill="x")
-        self.hdr = hdr
-        self.title_label = tk.Label(hdr, text="KeyVoice", bg=SURFACE, fg=TEXT,
-                                    font=FONT_TITLE)
-        self.status_canvas = tk.Canvas(hdr, width=10, height=10, bg=SURFACE, highlightthickness=0)
+        # 状态行（取消独立顶栏横列后：状态文本/状态点并入设备栏下方的一条窄行）
+        status_row = tk.Frame(root, bg=SURFACE)
+        status_row.pack(fill="x")
+        self.status_row = status_row
+        self.status_canvas = tk.Canvas(status_row, width=10, height=10, bg=SURFACE,
+                                       highlightthickness=0)
         self.dot = self.status_canvas.create_oval(0, 0, 10, 10, fill=WARNING)
-        self.status_label = tk.Label(hdr, textvariable=self.var_status, bg=SURFACE, fg=TEXT2,
-                                     font=FONT_SM, anchor="w")
-        self.status_spacer = tk.Label(hdr, text="   ", bg=SURFACE)
-        self.btn_top = self._hdr_btn(hdr, "置顶:开", self._toggle_top)
-        self.btn_dock = self._hdr_btn(hdr, "收起", self._toggle_dock)
-        self.close_btn = self._hdr_btn(hdr, "×", self.close, danger=True)
-        self.clock = tk.Label(hdr, text="", bg=SURFACE, fg=TEXT2, font=FONT_SM)
-        self.clock.bind("<Button-1>", self._hdr_click)   # 贴顶时点击横栏展开
-        self._pack_header()
-        # 贴顶时点击横栏（标题处）展开
-        hdr.bind("<Button-1>", self._hdr_click)
-        self.title_label.bind("<Button-1>", self._hdr_click)
-        self._tick_clock()
+        self.status_canvas.pack(side="left", padx=(12, 4), pady=4)
+        self.status_label = tk.Label(status_row, textvariable=self.var_status, bg=SURFACE,
+                                     fg=TEXT2, font=FONT_SM, anchor="w")
+        self.status_label.pack(side="left", fill="x", expand=True, pady=4)
 
         # 设备栏：本机名称 + 局域网设备数量与清单（点「搜索设备」重新扫描）
         devbar = tk.Frame(root, bg=SURFACE)
@@ -1044,6 +1034,11 @@ class Box:
         self.btn_rename = self._hdr_btn(devbar, "改名", self._rename_device)
         self.btn_remote = self._hdr_btn(devbar, "远控", self.toggle_remote)
         self.btn_scr = self._hdr_btn(devbar, "手机投屏", self.launch_scrcpy)
+        # 置顶/收起（原顶栏按钮，随顶栏取消后并入设备栏）
+        self.btn_top = self._hdr_btn(devbar, "置顶:开", self._toggle_top)
+        self.btn_dock = self._hdr_btn(devbar, "收起", self._toggle_dock)
+        # 触屏输入（九宫格 / 全键盘，覆盖全屏）
+        self.btn_touch = self._hdr_btn(devbar, "九宫格", self.open_touch_keyboard)
 
         # 消息列表（可滚动）
         self.list_frame = tk.Frame(root, bg=BG)
@@ -1075,10 +1070,13 @@ class Box:
         self.input_box.bind("<Return>", self._on_return)
         bar = tk.Frame(self.input_frame, bg=SURFACE)
         bar.pack(fill="x", padx=10, pady=(0, 4))
+        # 输入框左下角「＋」：发送文件/文件夹（全端共享）
+        self._btn(bar, "＋ 文件", self.send_files_to_phone, "left")
         self._btn(bar, "上屏", self._paste_input, "left")
         self._btn(bar, "发到手机", self.send_to_phone, "left")
-        self._btn(bar, "发文件", self.send_files_to_phone, "left")
         self._btn(bar, "收件箱", self.open_recv_dir, "left")
+        # 关闭按钮（原顶栏取消后移到输入框控制条右侧，不再占独立大白边）
+        self.close_btn = self._hdr_btn(bar, "×", self.close, danger=True)
         bar2 = tk.Frame(self.input_frame, bg=SURFACE)
         bar2.pack(fill="x", padx=10, pady=(0, 8))
         self._btn(bar2, "清空输入框", self._clear_input, "left")
@@ -1160,19 +1158,6 @@ class Box:
                       highlightthickness=0, highlightbackground=BORDER)
         b.pack(side="right")
         return b
-
-    def _pack_header(self):
-        """按固定顺序重建顶栏（收起/展开后恢复时用，保证部件顺序不变）。"""
-        for w in (self.title_label, self.status_canvas, self.status_label,
-                  self.status_spacer, self.btn_top, self.btn_dock, self.close_btn):
-            w.pack_forget()
-        self.title_label.pack(side="left", padx=12, pady=9)
-        self.status_canvas.pack(side="left")
-        self.status_label.pack(side="left", padx=8, pady=9)
-        self.status_spacer.pack(side="left", fill="x", expand=True)
-        self.btn_top.pack(side="right")
-        self.btn_dock.pack(side="right")
-        self.close_btn.pack(side="right")
 
     # ----------------------------------------------------------- 焦点跟踪
     def _foreign(self, hwnd):
@@ -1551,19 +1536,207 @@ class Box:
         except Exception as e:
             self.toast("打开目录失败：%s" % e)
 
+    # ------------------------------------------------ 触屏输入（九宫格 / 全键盘）
+
+    def open_touch_keyboard(self):
+        """触屏输入：无边框 Toplevel 覆盖整个屏幕，九宫格 / 全键盘可切换，
+        输入文字后一键群发到所有终端（与「发到手机」同语义，全端共享）。"""
+        top = tk.Toplevel(self.root)
+        top.title("触屏输入")
+        try:
+            top.attributes("-topmost", True)
+            top.overrideredirect(True)
+        except Exception:
+            pass
+        sw = top.winfo_screenwidth()
+        sh = top.winfo_screenheight()
+        top.geometry("%dx%d+0+0" % (sw, sh))
+        top.configure(bg=BG)
+
+        # 顶部条：标题 + 切换 + 发送 + 关闭
+        hdr = tk.Frame(top, bg=SURFACE)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="触屏输入（全端共享）", bg=SURFACE, fg=TEXT,
+                 font=FONT_TITLE).pack(side="left", padx=14, pady=10)
+        btn_close = tk.Button(hdr, text="✕", command=top.destroy,
+                              bg=ERROR, fg="#FFFFFF", activebackground="#C0392B",
+                              font=FONT_SM, borderwidth=0, relief="flat",
+                              padx=14, pady=8)
+        btn_close.pack(side="right", padx=8, pady=8)
+        btn_send = tk.Button(hdr, text="发送到所有设备", command=self._tk_send,
+                             bg=SUCCESS, fg="#062B12", activebackground="#27AE60",
+                             font=FONT_SM, borderwidth=0, relief="flat",
+                             padx=14, pady=8)
+        btn_send.pack(side="right", padx=8, pady=8)
+        btn_caps = tk.Button(hdr, text="大写", command=self._tk_toggle_caps,
+                             bg=SURFACE_HI, fg=TEXT2, activebackground=PRIMARY_PRESS,
+                             font=FONT_SM, borderwidth=0, relief="flat",
+                             padx=12, pady=8)
+        btn_caps.pack(side="right", padx=8, pady=8)
+        btn_switch = tk.Button(hdr, text="九宫格", command=self._tk_switch_mode,
+                               bg=SURFACE_HI, fg=TEXT2, activebackground=PRIMARY_PRESS,
+                               font=FONT_SM, borderwidth=0, relief="flat",
+                               padx=12, pady=8)
+        btn_switch.pack(side="right", padx=8, pady=8)
+
+        entry = tk.Text(top, height=3, bg=SURFACE_HI, fg=TEXT, font=FONT_SM,
+                        wrap="word", relief="flat", borderwidth=0,
+                        insertbackground=TEXT, padx=10, pady=8)
+        entry.pack(fill="x", padx=10, pady=6)
+        entry.focus_set()
+
+        keys = tk.Frame(top, bg=BG)
+        keys.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        # 全键盘：数字行 + 字母三行 + 符号行；九宫格：3×4 + 功能行
+        QW = ["1234567890",
+              "qwertyuiop",
+              "asdfghjkl",
+              "zxcvbnm"]
+        GRID = [("1", "2", "3"), ("4", "5", "6"), ("7", "8", "9"), ("*", "0", "#")]
+        SYM = ",.?;:'\"!()[]-_@/"
+
+        def rebuild():
+            for w in keys.winfo_children():
+                w.destroy()
+            if mode["grid"]:
+                for row in GRID:
+                    fr = tk.Frame(keys, bg=BG)
+                    fr.pack(fill="both", expand=True, pady=2)
+                    for ch in row:
+                        tk.Button(fr, text=ch, command=lambda c=ch: self._tk_type(c),
+                                  bg=SURFACE_HI, fg=TEXT, activebackground=PRIMARY_PRESS,
+                                  font=("Microsoft YaHei", 22, "bold"), borderwidth=0,
+                                  relief="flat").pack(side="left", fill="both", expand=True,
+                                                      padx=2, pady=2)
+                fr = tk.Frame(keys, bg=BG)
+                fr.pack(fill="both", expand=True, pady=2)
+                tk.Button(fr, text="空格", command=lambda: self._tk_type(" "),
+                          bg=SURFACE_HI, fg=TEXT, font=FONT_SM, borderwidth=0,
+                          relief="flat").pack(side="left", fill="both", expand=True,
+                                              padx=2, pady=2)
+                tk.Button(fr, text="⌫", command=self._tk_backspace,
+                          bg=SURFACE_HI, fg=TEXT, font=FONT_SM, borderwidth=0,
+                          relief="flat").pack(side="left", fill="both", expand=True,
+                                              padx=2, pady=2)
+                tk.Button(fr, text="⏎", command=self._tk_newline,
+                          bg=SURFACE_HI, fg=TEXT, font=FONT_SM, borderwidth=0,
+                          relief="flat").pack(side="left", fill="both", expand=True,
+                                              padx=2, pady=2)
+            else:
+                rows = list(QW)
+                for r in rows:
+                    fr = tk.Frame(keys, bg=BG)
+                    fr.pack(fill="both", expand=True, pady=2)
+                    for ch in r:
+                        tk.Button(fr, text=ch, command=lambda c=ch: self._tk_type(c),
+                                  bg=SURFACE_HI, fg=TEXT, activebackground=PRIMARY_PRESS,
+                                  font=("Consolas", 18), borderwidth=0,
+                                  relief="flat").pack(side="left", fill="both", expand=True,
+                                                      padx=2, pady=2)
+                fr = tk.Frame(keys, bg=BG)
+                fr.pack(fill="both", expand=True, pady=2)
+                for ch in SYM:
+                    tk.Button(fr, text=ch, command=lambda c=ch: self._tk_type(c),
+                              bg=SURFACE_HI, fg=TEXT, font=("Consolas", 15), borderwidth=0,
+                              relief="flat").pack(side="left", fill="both", expand=True,
+                                                  padx=1, pady=2)
+                fr = tk.Frame(keys, bg=BG)
+                fr.pack(fill="both", expand=True, pady=2)
+                tk.Button(fr, text="空格", command=lambda: self._tk_type(" "),
+                          bg=SURFACE_HI, fg=TEXT, font=FONT_SM, borderwidth=0,
+                          relief="flat").pack(side="left", fill="both", expand=True,
+                                              padx=2, pady=2)
+                tk.Button(fr, text="⌫", command=self._tk_backspace,
+                          bg=SURFACE_HI, fg=TEXT, font=FONT_SM, borderwidth=0,
+                          relief="flat").pack(side="left", fill="both", expand=True,
+                                              padx=2, pady=2)
+                tk.Button(fr, text="⏎", command=self._tk_newline,
+                          bg=SURFACE_HI, fg=TEXT, font=FONT_SM, borderwidth=0,
+                          relief="flat").pack(side="left", fill="both", expand=True,
+                                              padx=2, pady=2)
+
+        self._tk_win = top
+        self._tk_entry = entry
+        self._tk_switch_btn = btn_switch
+        self._tk_caps_btn = btn_caps
+        self._tk_rebuild = rebuild
+        rebuild()
+        top.bind("<Escape>", lambda e: top.destroy())
+
+    def _tk_type(self, ch):
+        e = getattr(self, "_tk_entry", None)
+        if e is None:
+            return
+        if ch.isalpha() and getattr(self, "_tk_caps", False):
+            ch = ch.upper()
+        e.insert("end", ch)
+
+    def _tk_backspace(self):
+        e = getattr(self, "_tk_entry", None)
+        if e is None:
+            return
+        try:
+            e.delete("end-1c")
+        except Exception:
+            pass
+
+    def _tk_newline(self):
+        e = getattr(self, "_tk_entry", None)
+        if e is None:
+            return
+        e.insert("end", "\n")
+
+    def _tk_toggle_caps(self):
+        self._tk_caps = not getattr(self, "_tk_caps", False)
+        self._tk_caps_btn.configure(bg=PRIMARY if self._tk_caps else SURFACE_HI)
+
+    def _tk_switch_mode(self):
+        self._tk_mode_grid = not getattr(self, "_tk_mode_grid", True)
+        self._tk_switch_btn.configure(
+            text="全键盘" if self._tk_mode_grid else "九宫格")
+        self._tk_rebuild()
+
+    def _tk_send(self):
+        e = getattr(self, "_tk_entry", None)
+        if e is None:
+            return
+        text = e.get("1.0", "end-1c")
+        if not text.strip():
+            self.toast("没有输入内容")
+            return
+        win = getattr(self, "_tk_win", None)
+        e.delete("1.0", "end")
+
+        def work():
+            ok, msg = self._send_all(text)
+            if win is not None:
+                self._safe_after(win.destroy)
+            self._safe_after(self.toast, msg)
+
+        threading.Thread(target=work, daemon=True).start()
+
     # ------------------------------------------------ 电脑 → 手机（发文件）
 
     def send_files_to_phone(self):
-        """选文件 → 发给局域网 / adb 发现的手机（多台则群发，与「发到手机」同语义）。"""
+        """选文件 / 文件夹 → 群发给局域网 / adb 发现的所有终端（文件传输全端共享）。"""
         if self.sending_file:
             self.toast("正在发送文件，请稍候…")
             return
-        files = filedialog.askopenfilenames(title="选择要发送到手机的文件（可多选）")
+        files = list(filedialog.askopenfilenames(title="选择要发送的文件（可多选）"))
         if not files:
-            return
-        files = list(files)
+            folder = filedialog.askdirectory(title="或选择要发送的文件夹")
+            if not folder:
+                return
+            files = []
+            for dirpath, _dirs, names in os.walk(folder):
+                for n in names:
+                    files.append(os.path.join(dirpath, n))
+            if not files:
+                self.toast("文件夹里没有文件")
+                return
         self.sending_file = True
-        self.toast("正在查找手机…")
+        self.toast("正在查找终端…")
         threading.Thread(target=self._do_send_files, args=(files,), daemon=True).start()
 
     def _do_send_files(self, files):
@@ -1600,15 +1773,18 @@ class Box:
             self._safe_after(self.update_status)
 
     def _file_targets(self):
-        """可接收文件的手机目标列表 [(url, 显示名)]：局域网发现优先，adb forward 兜底。"""
+        """可接收文件的终端目标列表 [(url, 显示名)]：局域网发现【所有终端】（电脑+手机），adb 兜底。
+
+        文件与文字同语义、全端共享：手机发的文件所有电脑都能收，电脑发的文件
+        所有手机/电脑都能收（每台终端都自带 /file 接收端点）。
+        """
         targets, seen = [], set()
         try:
             for ip, kind, name, port in discover_lan():
-                if kind != "phone" or not ip or ip in seen:
+                if not ip or ip in seen:
                     continue
                 seen.add(ip)
-                targets.append(("http://%s:%d/file" % (ip, PHONE_SRV_PORT),
-                                name or ip))
+                targets.append(("http://%s:%d/file" % (ip, port), name or ip))
         except Exception:
             pass
         if PHONE_ADDR["ip"] and PHONE_ADDR["ip"] not in seen:
@@ -2125,8 +2301,7 @@ class Box:
         self.root.minsize(300, 240)           # 恢复最小尺寸限制
         self.root.title("KeyVoice")
         self.flash_bar.configure(height=3)
-        self.hdr.pack(fill="x")               # 子部件未拆散，重排整个标题行即可
-        self.hdr.pack(fill="x")               # 子部件从未拆散，重排整个标题行即可
+        self.status_row.pack(fill="x")
         self.devbar.pack(fill="x")
         self.list_frame.pack(fill="both", expand=True, padx=0, pady=0)
         self.input_frame.pack(fill="x")

@@ -83,6 +83,15 @@ public class Sender {
      * 只会得到「连接被拒绝」，用户看到的就是「发送失败」。
      * 所以 adb 模式失败后自动回落到局域网 IP 再试一次，反之亦然。
      */
+    /** 供文件发送等复用：当前应投递的所有接收端 (host, port)，与文字群发同一份名单。 */
+    public static List<String[]> pcTargets(Context ctx) {
+        Config cfg = new Config(ctx);
+        List<Target> ts = resolveTargets(cfg);
+        List<String[]> out = new ArrayList<>();
+        for (Target t : ts) out.add(new String[]{t.host, String.valueOf(t.port)});
+        return out;
+    }
+
     private static String[] hosts(Config cfg) {
         String lan = cfg.host() == null ? "" : cfg.host().trim();
         String adb = "127.0.0.1";

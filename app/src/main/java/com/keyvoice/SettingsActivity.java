@@ -64,8 +64,13 @@ public class SettingsActivity extends Activity {
         // 少了 setTheme() 就只有深色一套，切换到浅色主题时这些控件仍然是深色。
         setTheme(Ui.themeRes("light".equalsIgnoreCase(cfg.theme())));
         Ui.setTheme(cfg.theme());
+        // 倒立联动：主页面（输入框 + 聊天面板）里被倒立的组件数超过总数 50% 时，
+        // 设置页所有文字与按钮也整体旋转 180°，与主页面方向保持一致。
+        int flippedCmp = (cfg.inputFlip() ? 1 : 0) + (cfg.chatFlip() ? 1 : 0);
+        int totalCmp = 2;                                // 主页面可倒立组件数
+        boolean flipSetting = flippedCmp * 2 > totalCmp; // 占比 > 50%
         // 方向：只允许竖屏/翻转竖屏，永不横屏（与主页面一致）
-        setRequestedOrientation(cfg.invertMode()
+        setRequestedOrientation((cfg.invertMode() || flipSetting)
                 ? android.content.pm.ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT
                 : android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
 
@@ -73,6 +78,12 @@ public class SettingsActivity extends Activity {
         LinearLayout root = Ui.rootScroll(this);
         sv.addView(root);
         setContentView(sv);
+        // 倒立联动生效：整页内容旋转 180°（所有文字、按钮、分区卡片一起倒过来）
+        if (flipSetting) {
+            sv.setRotation(180f);
+            sv.setLayoutParams(new android.widget.FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        }
 
         root.addView(Ui.appBar(this, "KeyVoice · 设置"));
 

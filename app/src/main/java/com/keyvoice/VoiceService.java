@@ -57,6 +57,12 @@ public class VoiceService extends Service {
     private MediaSession mediaSession;
     private Handler main;
     private Vibrator vibrator;
+    /** 最近一次已发送的文本与时间：识别引擎对同一段长语音可能回调多次 onResults，
+     *  用「相同文本 + 短时间窗」去重，避免同一段文字被发送/上屏两次 */
+    private String lastSentText = null;
+    private long lastSentAt = 0;
+    /** 结果处理中标志：防引擎在销毁窗口内的重复回调并发进入 */
+    private volatile boolean handlingResult = false;
 
     // ------------------------------------------------------------ 入口
 
@@ -239,6 +245,18 @@ public class VoiceService extends Service {
     private void handleResult(Bundle bundle, boolean broadcast) {
         ArrayList<String> list = bundle.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
         String text = (list != null && !list.isEmpty()) ? list.get(0) : "";
+        // 防重入：同一段语音长/多字时，识别引擎可能在销毁窗口内连续回调多次 onResults，
+        // 并发进入会各自走一遍发送 → 电脑端收到重复的两份。这里用标志挡掉并发第二次。
+        if (handlingResult) return;
+        handlingResult = true;
+        try {
+            handleResultInner(list, text, broadcast);
+        } finally {
+            handlingResult = false;
+        }
+    }
+
+    private void handleResultInner(ArrayList<String> list, String text, boolean broadcast) {
         listening = false;
         destroySr();
         releaseLocks();
@@ -248,6 +266,18 @@ public class VoiceService extends Service {
             if (new Config(this).continuous()) main.postDelayed(() -> beginListen(), 400);
             return;
         }
+
+        // 相同文本去重：识别引擎对同一段语音偶发「结果回调后又回调一次同样文本」
+        // （长录音尤其常见），8 秒窗口内同样的文字视为重复，丢弃不再发第二份。
+        long now = System.currentTimeMillis();
+        if (text.equals(lastSentText) && now - lastSentAt < 8000) {
+            updateNotification("待命中");
+            if (new Config(this).continuous()) main.postDelayed(() -> beginListen(), 500);
+            else if (!new Config(this).resident()) shutdown();
+            return;
+        }
+        lastSentText = text;
+        lastSentAt = now;
 
         Config cfg = new Config(this);
         String out = cfg.addNewline() ? text + "\n" : text;

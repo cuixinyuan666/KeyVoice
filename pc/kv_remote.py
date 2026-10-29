@@ -168,10 +168,17 @@ def grab_screen():
             _u32.ReleaseDC(0, hdc)
 
 
-def encode_jpeg(raw, w, h, target_w=1280, quality=60):
-    """BGRA → 缩放 → JPEG bytes（Pillow）。"""
+def encode_jpeg(raw, w, h, target_w=1280, target_h=0, quality=60):
+    """BGRA → 缩放 → JPEG bytes（Pillow）。
+
+    target_h>0 时按目标分辨率（如手机屏幕分辨率）直接拉伸输出，供全屏模式
+    使用；否则等比缩放到 target_w（普通模式）。
+    """
     img = Image.frombuffer("RGB", (w, h), raw, "raw", "BGRX", 0, 1)
-    if target_w and w > target_w:
+    if target_w and target_h and w > 0 and h > 0:
+        img = img.resize((max(2, int(target_w)), max(2, int(target_h))),
+                         Image.BILINEAR)
+    elif target_w and w > target_w:
         th = max(1, int(h * target_w / float(w)))
         img = img.resize((target_w, th), Image.BILINEAR)
     out = io.BytesIO()
@@ -269,16 +276,22 @@ _HTML = r"""<!DOCTYPE html>
   #kbar{position:fixed;left:0;right:0;bottom:0;display:none;gap:6px;padding:8px;background:var(--sf);border-top:1px solid var(--bd);z-index:9;flex-wrap:wrap}
   #kbar .b{padding:9px 12px}
   #tin{position:fixed;left:-9999px;top:-9999px;width:10px;height:10px}
+  /* 全屏模式：覆盖顶栏/底条，画面铺满整个手机屏幕 */
+  #wrap.full{inset:0}
+  #view.full{width:100%;height:100%;object-fit:fill}
+  #exf{position:fixed;right:12px;top:12px;display:none;z-index:20;border:1px solid var(--bd);background:rgba(22,26,33,.85);color:var(--tx);border-radius:9px;padding:8px 12px;font-size:13px}
 </style>
 </head>
 <body>
 <div id="bar">
   <span class="st" id="st">连接中…</span>
+  <button class="b" id="bf">全屏</button>
   <button class="b" id="bq">画质</button>
   <button class="b" id="bk">键盘</button>
   <button class="b" id="br">右键</button>
 </div>
 <div id="wrap"><img id="view" alt=""></div>
+<button id="exf">退出全屏</button>
 <div id="kbar">
   <button class="b" data-vk="esc">Esc</button>
   <button class="b" data-vk="tab">Tab</button>
@@ -380,6 +393,26 @@ _HTML = r"""<!DOCTYPE html>
   view.addEventListener('wheel', function(e){ post({t:'s', n: e.deltaY>0?-1:1}); e.preventDefault(); }, {passive:false});
 
   // ---- 按钮 ----
+  var full=false, bf=document.getElementById('bf'), exf=document.getElementById('exf');
+  var bar=document.getElementById('bar'), hint=document.getElementById('hint');
+  function enterFull(){
+    full=true;
+    bar.style.display='none'; hint.style.display='none'; kbar.style.display='none';
+    wrap.classList.add('full'); view.classList.add('full');
+    exf.style.display='block';
+    // 以手机屏幕分辨率为标准：服务端按「手机宽 × 手机高」直接出图，画面铺满整个手机屏
+    view.src=api('/stream?w='+Math.round(window.innerWidth)+'&h='+Math.round(window.innerHeight)
+                 +'&q='+FQ[quality][1]+'&t='+Date.now());
+  }
+  function exitFull(){
+    full=false;
+    bar.style.display='flex'; hint.style.display='block';
+    wrap.classList.remove('full'); view.classList.remove('full');
+    exf.style.display='none';
+    start();
+  }
+  bf.addEventListener('click', function(){ if(full){ exitFull(); } else { enterFull(); } });
+  exf.addEventListener('click', function(){ exitFull(); });
   document.getElementById('bq').addEventListener('click', function(){
     quality=(quality+1)%FQ.length; this.textContent='画质:'+['流畅','标准','高清'][quality]; start();
   });
@@ -520,9 +553,10 @@ class _Handler(BaseHTTPRequestHandler):
             return
         srv.add_watcher()
         w = int(self._q("w", "0") or 0)
+        h = int(self._q("h", "0") or 0)
         q = int(self._q("q", "0") or 0)
         if w > 0:
-            srv.set_video(w, q or srv.quality)
+            srv.set_video(w, q or srv.quality, h)
         last = -1
         try:
             while not srv.stopped:
@@ -610,6 +644,7 @@ class RemoteServer:
         self._fails = {}                      # ip -> [count, lock_until]
         # 视频参数（可被观看端覆盖）
         self.target_w = 1280
+        self.target_h = 0          # 全屏模式的目标高度（手机屏幕分辨率），0=等比
         self.quality = 60
         self.fps = 12
 
@@ -652,7 +687,8 @@ class RemoteServer:
             t0 = time.time()
             try:
                 w, h, raw = grab_screen()
-                jpg = encode_jpeg(raw, w, h, self.target_w, self.quality)
+                jpg = encode_jpeg(raw, w, h, self.target_w, self.target_h,
+                                  self.quality)
                 with self._cond:
                     self._frame = jpg
                     self._seq += 1
@@ -672,9 +708,13 @@ class RemoteServer:
         with self._lock:
             self._watchers = max(0, self._watchers - 1)
 
-    def set_video(self, w, q):
+    def set_video(self, w, q, h=0):
         if w and 400 <= w <= 3840:
             self.target_w = int(w)
+        if h and 400 <= h <= 3840:
+            self.target_h = int(h)
+        else:
+            self.target_h = 0        # 未指定高度 → 等比缩放（普通模式）
         if q and 20 <= q <= 95:
             self.quality = int(q)
 
@@ -694,7 +734,8 @@ class RemoteServer:
             return frame
         try:
             w, h, raw = grab_screen()
-            return encode_jpeg(raw, w, h, self.target_w, self.quality)
+            return encode_jpeg(raw, w, h, self.target_w, self.target_h,
+                               self.quality)
         except Exception as e:
             self._log("截屏失败: %s" % e)
             return None

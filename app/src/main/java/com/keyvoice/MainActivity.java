@@ -56,6 +56,8 @@ public class MainActivity extends Activity {
     private boolean sending = false;
     /** 电脑发来的消息正在回填输入框：期间抑制自动发送，避免原样回发形成死循环 */
     private boolean fromPc = false;
+    /** 主页面当前已应用的主题（用于从设置页返回时检测变化并重建以联动） */
+    private static String appliedTheme = "";
 
     /**
      * 输入区高度（dp）。刻意写死而不依赖 WRAP_CONTENT：
@@ -182,6 +184,7 @@ public class MainActivity extends Activity {
         // 只做 ② 会导致「页面是浅色、弹窗还是深色」，也就是主题不统一。
         setTheme(Ui.themeRes("light".equalsIgnoreCase(cfg.theme())));
         Ui.setTheme(cfg.theme());
+        appliedTheme = cfg.theme();
 
         // 根用 FrameLayout：内容垂直排列 + 一个左侧竖排提示层（不挡按钮）
         FrameLayout root = new FrameLayout(this);
@@ -257,6 +260,7 @@ public class MainActivity extends Activity {
         // 输入框调节把手：左下角、高对比（accent 底 + 白色把手条），点击即进入调节模式（拖动输入框）。
         // 体积缩小为 40×26dp，避免遮挡输入区。
         ImageButton inputHandle = new ImageButton(this);
+        inputHandle.setId(View.generateViewId());
         int ihs = Ui.dp(this, 26);
         RelativeLayout.LayoutParams ihp = new RelativeLayout.LayoutParams(
                 Ui.dp(this, 40), ihs);
@@ -272,6 +276,24 @@ public class MainActivity extends Activity {
         inputHandle.setOnClickListener(v -> enterInputAdjust());
         inputWrap.addView(inputHandle);
         inputHandle.bringToFront();
+
+        // 输入框左下角「+」：一键进入文件互传（发送/接收任意文件，全端共享）。
+        // 放在调节把手正上方，紧贴输入框左下角。
+        ImageButton btnPlus = new ImageButton(this);
+        int pps = Ui.dp(this, 34);
+        RelativeLayout.LayoutParams ppp = new RelativeLayout.LayoutParams(pps, pps);
+        ppp.addRule(RelativeLayout.ALIGN_PARENT_LEFT);
+        ppp.addRule(RelativeLayout.ABOVE, inputHandle.getId());
+        ppp.setMargins(Ui.dp(this, 6), 0, 0, Ui.dp(this, 5));
+        btnPlus.setLayoutParams(ppp);
+        btnPlus.setImageResource(R.drawable.ic_plus);
+        btnPlus.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        btnPlus.setBackground(Ui.buttonBg(Ui.surfaceHi(this), Ui.primaryDim(this), pps / 2f));
+        btnPlus.setElevation(Ui.dp(this, 6));
+        btnPlus.setContentDescription("发送文件（全端共享）");
+        btnPlus.setOnClickListener(v -> startActivity(new Intent(this, FileActivity.class)));
+        inputWrap.addView(btnPlus);
+        btnPlus.bringToFront();
 
         // 救砖入口：长按输入框右下角状态点 → 报告三个按钮的真实几何（不依赖 adb），并提供一键复位。
         // 这是为无法使用 adb 的场景准备的：几何值直接显示在屏幕上，可截屏反馈。
@@ -1746,6 +1768,13 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        // 主题联动：设置页改主题后回到主页面，检测变化并重建以套用新色板
+        if (!appliedTheme.equals(cfg.theme())) {
+            appliedTheme = cfg.theme();
+            Ui.setTheme(cfg.theme());
+            recreate();
+            return;
+        }
         // 从设置页返回时，设备名可能刚改过，这里重新读一次
         refreshDeviceBar();
         refreshStatus();

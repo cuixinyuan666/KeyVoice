@@ -45,9 +45,10 @@ public final class FileSender {
         final Context app = ctx.getApplicationContext();
         new Thread(() -> {
             Config cfg = new Config(app);
-            String host = cfg.adbMode() ? "127.0.0.1" : cfg.host();
-            int port = cfg.port();
-            if (host == null || host.isEmpty()) {
+            // 全端共享：文件与文字一样，同时投递到所有已发现/配置的接收端
+            // （adb 隧道 + 配置 host + 扫描到的所有 PC），而不再只发单一一台。
+            List<String[]> targets = Sender.pcTargets(app);
+            if (targets.isEmpty()) {
                 MAIN.post(() -> done.onDone(false, "未设置电脑地址：请先在设置里填写或搜索设备"));
                 return;
             }
@@ -57,18 +58,23 @@ public final class FileSender {
                 Uri u = uris.get(i);
                 String name = queryName(app, u);
                 long size = querySize(app, u);
-                try {
-                    uploadOne(app, cfg, u, name, size, host, port, i, uris.size(), pg);
-                    okN++;
-                } catch (Exception e) {
-                    lastErr = name + "：" + (e.getMessage() == null ? e.toString() : e.getMessage());
+                int fileOk = 0;
+                for (String[] hp : targets) {
+                    try {
+                        uploadOne(app, cfg, u, name, size, hp[0],
+                                Integer.parseInt(hp[1]), i, uris.size(), pg);
+                        fileOk++;
+                    } catch (Exception e) {
+                        lastErr = name + "：" + (e.getMessage() == null ? e.toString() : e.getMessage());
+                    }
                 }
+                if (fileOk > 0) okN++;
             }
             final int fOk = okN;
             final String fErr = lastErr;
             final int total = uris.size();
             MAIN.post(() -> {
-                if (fOk == total) done.onDone(true, "已发送 " + fOk + " 个文件到电脑");
+                if (fOk == total) done.onDone(true, "已发送 " + fOk + " 个文件到所有设备");
                 else if (fOk > 0) done.onDone(true, "成功 " + fOk + "/" + total + "，失败：" + fErr);
                 else done.onDone(false, "发送失败：" + fErr);
             });
