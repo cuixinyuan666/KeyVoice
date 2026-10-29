@@ -24,8 +24,8 @@ android {
         applicationId "com.keyvoice"
         minSdk 28
         targetSdk 34
-        versionCode 21
-        versionName "0.4.0"
+        versionCode 23
+        versionName "0.4.2"
     }
 
     signingConfigs {
