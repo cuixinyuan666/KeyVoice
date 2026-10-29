@@ -1030,15 +1030,28 @@ class Box:
         self.dev_list_label = tk.Label(devbar, textvariable=self.var_devlist, bg=SURFACE,
                                        fg=TEXT3, font=FONT_SM, anchor="w", justify="left")
         self.dev_list_label.pack(side="left", fill="x", expand=True, pady=(0, 6))
-        self.btn_scan = self._hdr_btn(devbar, "搜索设备", self._scan_devices)
-        self.btn_rename = self._hdr_btn(devbar, "改名", self._rename_device)
-        self.btn_remote = self._hdr_btn(devbar, "远控", self.toggle_remote)
-        self.btn_scr = self._hdr_btn(devbar, "手机投屏", self.launch_scrcpy)
-        # 置顶/收起（原顶栏按钮，随顶栏取消后并入设备栏）
-        self.btn_top = self._hdr_btn(devbar, "置顶:开", self._toggle_top)
-        self.btn_dock = self._hdr_btn(devbar, "收起", self._toggle_dock)
-        # 触屏输入（九宫格 / 全键盘，覆盖全屏）
-        self.btn_touch = self._hdr_btn(devbar, "九宫格", self.open_touch_keyboard)
+        # 设备栏操作按钮：屏幕较小时全部折叠进「更多」下拉菜单，避免按钮挤占空间显示不全
+        # （从右到左原为：九宫格 / 收起 / 置顶 / 手机投屏 / 远控 / 改名 / 搜索设备）
+        self._menu_idx = {"scan": 0, "rename": 1, "remote": 2, "scr": 3,
+                          "top": 4, "dock": 5, "touch": 6}
+        self.menu = tk.Menu(devbar, tearoff=0, bg=SURFACE_HI, fg=TEXT,
+                            activebackground=PRIMARY, activeforeground="#FFFFFF",
+                            font=FONT_SM, bd=0, relief="flat")
+        self.menu.add_command(label="搜索设备", command=self._scan_devices)
+        self.menu.add_command(label="改名", command=self._rename_device)
+        self.menu.add_command(label="远控", command=self.toggle_remote)
+        self.menu.add_command(label="手机投屏", command=self.launch_scrcpy)
+        self.menu.add_command(label="置顶:开", command=self._toggle_top)
+        self.menu.add_command(label="收起", command=self._toggle_dock)
+        self.menu.add_command(label="九宫格", command=self.open_touch_keyboard)
+        self.menu_btn = tk.Menubutton(devbar, text="更多 ▾", menu=self.menu,
+                                      bg=SURFACE, fg=TEXT2,
+                                      activebackground=PRIMARY_PRESS,
+                                      activeforeground="#FFFFFF", font=FONT_SM,
+                                      borderwidth=0, relief="flat", padx=10, pady=9,
+                                      highlightthickness=0, highlightbackground=BORDER,
+                                      direction="below")
+        self.menu_btn.pack(side="right")
 
         # 消息列表（可滚动）
         self.list_frame = tk.Frame(root, bg=BG)
@@ -1158,6 +1171,24 @@ class Box:
                       highlightthickness=0, highlightbackground=BORDER)
         b.pack(side="right")
         return b
+
+    def _menu_set(self, name, label, fg=None, state=None):
+        """更新设备栏「更多」下拉菜单中某项的文案/颜色/状态。
+
+        name 必须是 self._menu_idx 里的键（scan/rename/remote/scr/top/dock/touch）。
+        """
+        idx = getattr(self, "_menu_idx", {}).get(name)
+        if idx is None:
+            return
+        kw = {"label": label}
+        if fg is not None:
+            kw["foreground"] = fg
+        if state is not None:
+            kw["state"] = state
+        try:
+            self.menu.entryconfig(idx, **kw)
+        except Exception:
+            pass
 
     # ----------------------------------------------------------- 焦点跟踪
     def _foreign(self, hwnd):
@@ -1573,7 +1604,7 @@ class Box:
                              font=FONT_SM, borderwidth=0, relief="flat",
                              padx=12, pady=8)
         btn_caps.pack(side="right", padx=8, pady=8)
-        btn_switch = tk.Button(hdr, text="九宫格", command=self._tk_switch_mode,
+        btn_switch = tk.Button(hdr, text="全键盘", command=self._tk_switch_mode,
                                bg=SURFACE_HI, fg=TEXT2, activebackground=PRIMARY_PRESS,
                                font=FONT_SM, borderwidth=0, relief="flat",
                                padx=12, pady=8)
@@ -1599,7 +1630,7 @@ class Box:
         def rebuild():
             for w in keys.winfo_children():
                 w.destroy()
-            if mode["grid"]:
+            if self._tk_mode_grid:
                 for row in GRID:
                     fr = tk.Frame(keys, bg=BG)
                     fr.pack(fill="both", expand=True, pady=2)
@@ -1656,6 +1687,8 @@ class Box:
                           relief="flat").pack(side="left", fill="both", expand=True,
                                               padx=2, pady=2)
 
+        # 默认九宫格模式（True=九宫格 / False=全键盘），rebuild 与切换按钮都以此为唯一状态源
+        self._tk_mode_grid = True
         self._tk_win = top
         self._tk_entry = entry
         self._tk_switch_btn = btn_switch
@@ -1896,7 +1929,7 @@ class Box:
                                  "%s\n\n（端口 %d 可能被占用）" % (e, REMOTE_PORT))
             return
         try:
-            self.btn_remote.configure(fg=SUCCESS, text="远控:开")
+            self._menu_set("remote", "远控:开", fg=SUCCESS)
         except Exception:
             pass
         self._show_remote_panel()
@@ -1909,7 +1942,7 @@ class Box:
                 pass
             self.remote = None
         try:
-            self.btn_remote.configure(fg=TEXT2, text="远控")
+            self._menu_set("remote", "远控", fg=TEXT2)
         except Exception:
             pass
         if self.remote_win is not None and self.remote_win.winfo_exists():
@@ -2226,7 +2259,7 @@ class Box:
         if getattr(self, "_scanning", False):
             return
         self._scanning = True
-        self.btn_scan.configure(text="搜索中…", state="disabled")
+        self._menu_set("scan", "搜索中…", state="disabled")
         self.var_devlist.set("正在搜索设备…")
 
         def work():
@@ -2235,7 +2268,7 @@ class Box:
 
             def done():
                 self._scanning = False
-                self.btn_scan.configure(text="搜索设备", state="normal")
+                self._menu_set("scan", "搜索设备", state="normal")
                 self.lan_devices = devices
                 if not devices:
                     self.var_devlist.set("未发现设备（确认对方已运行 KeyVoice 且在同一 WiFi）")
@@ -2256,7 +2289,7 @@ class Box:
     def _toggle_top(self):
         self.top = not self.top
         self.root.attributes("-topmost", self.top)
-        self.btn_top.configure(text="置顶:开" if self.top else "置顶:关")
+        self._menu_set("top", "置顶:开" if self.top else "置顶:关")
         self._reset_idle()
 
     def _toggle_dock(self):
@@ -2307,7 +2340,7 @@ class Box:
         self.input_frame.pack(fill="x")
         self.docked = False
         self._no_dock_until = time.time() + 1.0   # 展开后 1 秒宽限：从顶部热区往下移进窗口不会被立刻收起
-        self.btn_dock.configure(text="收起")
+        self._menu_set("dock", "收起")
         self.scroll_to_bottom()
         self._reset_idle()
 
