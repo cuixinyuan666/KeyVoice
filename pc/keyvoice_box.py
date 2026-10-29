@@ -40,6 +40,7 @@ import ctypes
 import http.client
 import json
 import os
+import queue
 import socket
 import subprocess
 import sys
@@ -930,9 +931,33 @@ class MirrorGuard:
 
 class Box:
     def _safe_after(self, fn, *args):
-        """后台线程安全切主线程；mainloop 未运行（无头测试/异常场景）时不抛异常。"""
+        """后台线程安全切主线程：放进队列，由 _pump_ui 在主线程里取出执行。
+
+        以前这里是 `self._safe_after(lambda: fn(*args))` —— 自己调自己，
+        结果是无限递归直到 RecursionError 被 except 吞掉：**任务一次都没执行过**。
+        表现就是：消息收到了但列表不刷新、「搜索设备」扫到了但设备栏不变、
+        toast 永远不弹，而 HTTP 照样回 200 —— 手机显示成功、电脑上却什么都没变。
+        """
         try:
-            self._safe_after(lambda: fn(*args))
+            self._uiq.put((fn, args))
+        except Exception:
+            pass
+
+    def _pump_ui(self):
+        """主线程定时把队列里的任务跑掉（Tk 只能在主线程操作）。"""
+        try:
+            while True:
+                fn, args = self._uiq.get_nowait()
+                try:
+                    fn(*args)
+                except Exception as e:
+                    diag("UI 任务执行失败: %r" % (e,))
+        except queue.Empty:
+            pass
+        except Exception:
+            pass
+        try:
+            self.root.after(30, self._pump_ui)
         except Exception:
             pass
 
@@ -940,6 +965,7 @@ class Box:
     def __init__(self, root, port):
         self.root = root
         self.port = port
+        self._uiq = queue.Queue()      # 后台线程 → 主线程的任务队列（见 _safe_after）
         self.total = 0                 # 累计收到条数
         self.messages = []             # 当前列表中的消息 {id,text,edited,row,label,edit_btn}
         self.last_external = None
@@ -1182,6 +1208,7 @@ class Box:
         self._render_message(msg)
         self.scroll_to_bottom()
         self.update_status()
+        diag("已上屏到列表 id=%d 共 %d 条" % (msg["id"], len(self.messages)))
 
         # 展开态：绿闪条；收起(隐藏)态：不弹任何可见提示，鼠标移到顶部才显示（QQ 式贴边）
         if not self.docked:
@@ -1191,7 +1218,7 @@ class Box:
         if not ok:
             self.toast("剪贴板被占用，写入失败（请稍后再试）")
             return
-        if self.var_auto.get() and self._paste_to_foreign():
+        if self.var_auto.get() and not os.environ.get("KV_NO_PASTE") and self._paste_to_foreign():
             self.toast("已上屏到当前光标处")
         else:
             self.toast("已存剪贴板（点一下目标输入框，再发即可 Ctrl+V）")
@@ -2043,6 +2070,7 @@ class Box:
                                for d in devices)
                 self.var_devlist.set("发现 %d 台设备：%s" % (len(devices), names))
                 self.toast("找到 %d 台设备" % len(devices))
+                diag("设备栏已更新：%s" % self.var_devlist.get())
 
             self._safe_after(done)
 
@@ -2316,6 +2344,7 @@ def main():
     root = tk.Tk()
     app = Box(root, PORT)
     threading.Thread(target=serve, args=(PORT, app), daemon=True).start()
+    root.after(0, app._pump_ui)             # 后台线程 → 主线程 的任务泵
     if os.environ.get("KV_AUTOSCAN"):       # 排查用：启动 3 秒后自动扫一次并写 diag.log
         root.after(3000, app._scan_devices)
     root.mainloop()
