@@ -504,14 +504,32 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(port, app):
+    """HTTP 接收服务；绑定失败（端口被占等）不放弃，隔 2 秒重试，避免静默失联。"""
     Handler.app = app
-    ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
+    while True:
+        try:
+            ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
+        except Exception:
+            time.sleep(2)
 
 
 # -------------------------------------------------------- 局域网自动发现（回应）
 
 def udp_listen(port):
-    """老协议应答（UDP 17891）：老版本手机只认 KEYVOICE_HELLO:<port>。"""
+    """老协议应答（UDP 17891）：老版本手机只认 KEYVOICE_HELLO:<port>。
+
+    外层 while 是自愈脚手架：端口被别的实例占住、网卡切换导致 bind 失败等情况下
+    隔一会儿重试，而不是让线程静默死掉（thread daemon 死了没有任何界面提示）。
+    """
+    while True:
+        try:
+            _udp_listen_once(port)
+        except Exception:
+            pass
+        time.sleep(2)
+
+
+def _udp_listen_once(port):
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -520,13 +538,23 @@ def udp_listen(port):
         while True:
             try:
                 data, addr = s.recvfrom(256)
+            except socket.timeout:
+                continue
+            except OSError:
+                # Windows 上「上一次 sendto 的目标端口不可达」会让下一次 recvfrom
+                # 抛 WSAECONNRESET(10054)。以前这里 break，线程就静默退出、socket 却
+                # 还占着端口 —— 表现正是「PC 端明明在运行，却永远发现不了手机」。
+                time.sleep(0.05)
+                continue
+            except Exception:
+                time.sleep(0.2)
+                continue
+            try:
                 if b"KEYVOICE_DISCOVER" in data:
                     PHONE_ADDR["ip"] = addr[0]   # 记住手机 IP，供「发到手机」直连
                     s.sendto(("KEYVOICE_HELLO:%d" % port).encode("utf-8"), addr)
-            except socket.timeout:
-                continue
             except Exception:
-                break
+                continue
     except Exception:
         pass
 
@@ -688,7 +716,18 @@ def lan_discover_responder():
 
     新协议应答里带上【端口 + 本机设备名】，这样手机和别的电脑扫到的是
     「张三的电脑」这种名字，而不是一串 IP。设备名可在界面上改，立即生效。
+
+    外层 while 是自愈脚手架（同 udp_listen）：绑定失败或线程意外退出后 2 秒重试。
     """
+    while True:
+        try:
+            _lan_discover_responder_once()
+        except Exception:
+            pass
+        time.sleep(2)
+
+
+def _lan_discover_responder_once():
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -697,13 +736,22 @@ def lan_discover_responder():
         while True:
             try:
                 data, addr = s.recvfrom(256)
+            except socket.timeout:
+                continue
+            except OSError:
+                # 同 udp_listen：ICMP 端口不可达会让 Windows 把错误报到下一次
+                # recvfrom 上，必须继续循环而不是退出，否则发现应答永久失效。
+                time.sleep(0.05)
+                continue
+            except Exception:
+                time.sleep(0.2)
+                continue
+            try:
                 if data.startswith(b"KV_DISCOVER") and addr[0] not in my_ips():
                     out = ("KV_PC_HERE:%d:%s" % (PORT, DEVICE_NAME["name"])).encode("utf-8")
                     s.sendto(out, addr)
-            except socket.timeout:
-                continue
             except Exception:
-                break
+                continue
     except Exception:
         pass
 

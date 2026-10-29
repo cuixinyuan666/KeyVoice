@@ -112,13 +112,21 @@ public final class LanServer {
                 byte[] buf = new byte[128];
                 java.net.DatagramPacket p = new java.net.DatagramPacket(buf, buf.length);
                 while (true) {
-                    ds.receive(p);
-                    String s = new String(p.getData(), 0, p.getLength(), StandardCharsets.UTF_8);
-                    if (s.startsWith("KV_DISCOVER")) {
-                        byte[] out = ("KV_PHONE_HERE:" + PORT + ":" + deviceName)
-                                .getBytes(StandardCharsets.UTF_8);
-                        ds.send(new java.net.DatagramPacket(out, out.length,
-                                p.getAddress(), p.getPort()));
+                    // 单条报文出错不能让应答线程退出：UDP 上偶尔会收到畸形包，
+                    // 或 sendto 目标已下线（ICMP 不可达），以前一处异常就 break，
+                    // 结果「手机再也搜不到电脑」且只有重启 App 才能恢复。
+                    try {
+                        ds.receive(p);
+                        String s = new String(p.getData(), 0, p.getLength(), StandardCharsets.UTF_8);
+                        if (s.startsWith("KV_DISCOVER")) {
+                            byte[] out = ("KV_PHONE_HERE:" + PORT + ":" + deviceName)
+                                    .getBytes(StandardCharsets.UTF_8);
+                            ds.send(new java.net.DatagramPacket(out, out.length,
+                                    p.getAddress(), p.getPort()));
+                        }
+                    } catch (Exception e) {
+                        Log.w(TAG, "discovery responder: " + e);
+                        try { Thread.sleep(100); } catch (InterruptedException ignored) { }
                     }
                 }
             } catch (Exception e) {
