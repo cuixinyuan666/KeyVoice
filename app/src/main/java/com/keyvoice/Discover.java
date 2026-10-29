@@ -253,6 +253,11 @@ public class Discover {
                         s.receive(p);
                     } catch (SocketTimeoutException e) {
                         continue;
+                    } catch (Exception e) {
+                        // 单次收包异常（个别机型上 ICMP 不可达会以 PortUnreachableException 形式抛出）
+                        // 不能让整轮扫描直接失败，否则界面就是「未发现设备」
+                        Log.w(TAG, "scan receive: " + e);
+                        continue;
                     }
                     String msg = new String(p.getData(), 0, p.getLength(), "UTF-8").trim();
                     String ip = p.getAddress() == null ? null : p.getAddress().getHostAddress();

@@ -71,6 +71,32 @@ except Exception:                        # 缺文件时不致命：远控按钮�
     kv_remote = None
 
 
+# ---------------------------------------------------------------- 运行诊断日志
+# 排查「电脑搜不到手机 / 手机发送失败」这类只有用户现场才复现的问题时，
+# 界面上的提示太笼统（只有一个「未发现设备」），所以把关键事件写进
+# %APPDATA%\KeyVoice\diag.log（只在出错/扫描/收消息时写，量很小，可随时删）。
+
+_DIAG_LOCK = threading.Lock()
+
+
+def diag(msg):
+    try:
+        p = os.path.join(os.path.dirname(_config_path() or ""), "diag.log")
+        if not os.path.dirname(p):
+            return
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with _DIAG_LOCK:
+            if os.path.exists(p) and os.path.getsize(p) > 512 * 1024:
+                try:
+                    os.replace(p, p + ".1")
+                except Exception:
+                    pass
+            with open(p, "a", encoding="utf-8") as f:
+                f.write("%s %s\n" % (time.strftime("%m-%d %H:%M:%S"), msg))
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------- 文件互传工具
 
 def default_recv_dir():
@@ -463,6 +489,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             pass
         if text and Handler.app:
+            diag("收到文字 from=%r len=%d" % (from_name, len(text)))
             Handler.app.receive(text, from_name)
         self.reply({"ok": True})
 
@@ -524,8 +551,8 @@ def udp_listen(port):
     while True:
         try:
             _udp_listen_once(port)
-        except Exception:
-            pass
+        except Exception as e:
+            diag("udp_listen 17891 异常退出，2s 后重启: %r" % (e,))
         time.sleep(2)
 
 
@@ -703,11 +730,21 @@ def discover_lan(timeout=1.2):
                     found[addr[0]] = (kind, name, port)
             except socket.timeout:
                 continue
-            except Exception:
-                break
+            except OSError as e:
+                # 同一个坑：局域网里【任何一台不跑 KeyVoice 的设备】收到广播都会回
+                # ICMP 端口不可达，Windows 把它报到 recvfrom 上（WSAECONNRESET）。
+                # 旧代码 break → 整轮扫描直接返回空列表，界面显示「未发现设备」，
+                # 而实际上手机早就回包了（只是可能还没读到）。
+                diag("discover_lan recvfrom OSError: %r（继续扫描）" % (e,))
+                time.sleep(0.02)
+                continue
+            except Exception as e:
+                diag("discover_lan recvfrom error: %r（继续扫描）" % (e,))
+                time.sleep(0.02)
+                continue
         s.close()
-    except Exception:
-        pass
+    except Exception as e:
+        diag("discover_lan 失败: %r" % (e,))
     return [(ip, k, n, p) for ip, (k, n, p) in found.items()]
 
 
@@ -722,8 +759,8 @@ def lan_discover_responder():
     while True:
         try:
             _lan_discover_responder_once()
-        except Exception:
-            pass
+        except Exception as e:
+            diag("发现应答 17893 异常退出，2s 后重启: %r" % (e,))
         time.sleep(2)
 
 
@@ -1991,6 +2028,7 @@ class Box:
 
         def work():
             devices = discover_lan()
+            diag("「搜索设备」结果=%r" % (devices,))
 
             def done():
                 self._scanning = False
@@ -2273,10 +2311,13 @@ def main():
     threading.Thread(target=udp_listen, args=(PORT,), daemon=True).start()
     # 应答其它设备的发现广播（多设备互发现）
     threading.Thread(target=lan_discover_responder, daemon=True).start()
+    diag("启动 端口=%d 本机IP=%r 设备名=%r" % (PORT, sorted(my_ips()), DEVICE_NAME["name"]))
 
     root = tk.Tk()
     app = Box(root, PORT)
     threading.Thread(target=serve, args=(PORT, app), daemon=True).start()
+    if os.environ.get("KV_AUTOSCAN"):       # 排查用：启动 3 秒后自动扫一次并写 diag.log
+        root.after(3000, app._scan_devices)
     root.mainloop()
 
 
